@@ -20,7 +20,7 @@ A successful no-op means the skill is current. Surface an update failure instead
 
 ## 1. Apply cross-cutting source adapters
 
-- **Media:** For any audio, image, icon, logo, voice, grade, LUT, treatment/effect, caption, or media-operation need, load `/media-use` and follow its adoption, resolution, provider, provenance, and reuse contracts. Vague footage feedback and named styles use its `media-treatments.md` policy before editing; do not improvise supported media effects with CSS/SVG/opacity. Before the first authenticated provider action, run `npx hyperframes auth status` and relay its output verbatim. If signed out, apply the gate in `../hyperframes-core/references/brief-contract.md`: collaborative waits for sign-in or an explicit offline choice; autonomous states the status and continues through an available offline provider. Surface a blocker when no offline provider can satisfy a required capability. Local adoption alone does not require an auth gate.
+- **Media:** For any audio, image, icon, logo, voice, grade, LUT, treatment/effect, caption, or media-operation need, load `/media-use` and follow `../media-use/references/resolve.md` (resolve, adopt, reuse) and `../media-use/references/setup-providers.md` (providers, auth). Vague footage feedback and named styles use `../media-use/references/media-treatments.md` before editing; do not improvise supported media effects with CSS/SVG/opacity. Before the first authenticated provider action, run `npx hyperframes auth status` and relay its output verbatim. If signed out, apply the gate in `../hyperframes-core/references/brief-contract.md`: collaborative waits for sign-in or an explicit offline choice; autonomous states the status and continues through an available offline provider. Surface a blocker when no offline provider can satisfy a required capability. Local adoption alone does not require an auth gate.
 - **Figma:** If any input is a `figma.com` URL, run `/figma` first. Build from its exported assets, tokens, components, or storyboard frames. Do not use raw Figma connector calls because they skip SVG sanitization, media provenance, and brand-token binding.
 
 These adapters do not change the workflow selected by `/hyperframes`.
@@ -154,3 +154,11 @@ A run is complete only when:
 - the rendered file is verified when a render was requested.
 
 After final approval, offer once to freeze the run as a recipe, following `../hyperframes-core/references/review-loop.md` § 4.
+
+## 中文执行导读
+
+这是 `general-video` 的中文 runtime 入口。
+
+中文视频或动效请求命中本 skill 时，先按下方上游路由和契约执行。输出说明使用简体中文；HTML、CSS、timing、seek-safe、render、CLI 命令、JSON/YAML key、路径、代码和验证阈值保持原样。
+
+# General video

@@ -5,6 +5,7 @@ import {
   formatSnapshotTimestamp,
   parseZoomScale,
   requireSnapshotFfmpeg,
+  resolveSnapshotVideoClipStart,
   resolveSnapshotVideoFrameTime,
   tailFrameTime,
 } from "./snapshot.js";
@@ -51,6 +52,13 @@ describe("transparent snapshot capture", () => {
     expect(source).toContain("proxy: {");
     expect(source).toContain("autoProxy: args.proxy as boolean | undefined");
     expect(source).toContain("opts.autoProxy");
+  });
+
+  it("resolves and forwards the shared local browser GPU policy", () => {
+    const source = readFileSync(new URL("./snapshot.ts", import.meta.url), "utf8");
+    expect(source).toContain("resolveLocalBrowserGpuMode");
+    expect(source).toContain("browserGpuMode: opts.browserGpuMode");
+    expect(source).toContain('"browser-gpu": {');
   });
 });
 
@@ -151,6 +159,35 @@ describe("resolveSnapshotVideoFrameTime", () => {
     const result = resolveSnapshotVideoFrameTime(input);
     if (expected === null) expect(result).toBeNull();
     else expect(result).toBeCloseTo(expected, 6);
+  });
+});
+
+describe("resolveSnapshotVideoClipStart", () => {
+  it("offsets a scene-local video start by its later template host", () => {
+    expect(
+      resolveSnapshotVideoClipStart({
+        authoredStart: 0,
+        runtimeResolvedStart: 3,
+      }),
+    ).toBe(3);
+  });
+
+  it("uses the runtime's recursively resolved start for deeply nested media", () => {
+    expect(
+      resolveSnapshotVideoClipStart({
+        authoredStart: 1,
+        runtimeResolvedStart: 8,
+      }),
+    ).toBe(8);
+  });
+
+  it("keeps authored starts as a compatibility fallback", () => {
+    expect(
+      resolveSnapshotVideoClipStart({
+        authoredStart: 3,
+        runtimeResolvedStart: null,
+      }),
+    ).toBe(3);
   });
 });
 

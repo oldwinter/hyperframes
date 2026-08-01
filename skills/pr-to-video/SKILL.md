@@ -267,3 +267,11 @@ The reusable, domain-agnostic shot shapes live in `../hyperframes-animation/blue
 | `[sub-agents/frame-worker.md](sub-agents/frame-worker.md)`                                                                                                  | Step 5: the workflow's frame-worker delta.                                     |
 | `[../hyperframes-core/references/subagent-dispatch.md](../hyperframes-core/references/subagent-dispatch.md)`                                                | Step 5: dispatch sub-agents safely.                                            |
 | `[../hyperframes-creative/frame-presets/code-editorial/FRAME.md](../hyperframes-creative/frame-presets/code-editorial/FRAME.md)`                            | Step 2: the code-editorial preset (fixed style).                               |
+
+## 中文执行导读
+
+这是 `pr-to-video` 的中文 runtime 入口。
+
+中文视频或动效请求命中本 skill 时，先按下方上游路由和契约执行。输出说明使用简体中文；HTML、CSS、timing、seek-safe、render、CLI 命令、JSON/YAML key、路径、代码和验证阈值保持原样。
+
+# PR to HyperFrames

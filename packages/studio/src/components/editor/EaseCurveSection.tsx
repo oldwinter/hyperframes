@@ -5,58 +5,22 @@ import {
   parseWiggleEase,
   type WiggleEaseConfig,
 } from "@hyperframes/core/wiggle-ease";
-import { EASE_PRESETS, easePresetLabel } from "./easePresetLibrary";
+import { easePresetLabel } from "./easePresetLibrary";
+import {
+  DEFAULT_CURVE,
+  MODE_LABELS,
+  EaseModeToggle,
+  EasePresetGrid,
+  type EaseMode,
+  type Pts,
+} from "./EaseModeControls";
 import { holdCurvePath, MiniCurveSvg, sampledPath } from "./easeCurveSvg";
 import { EaseBezierField, SpringBounceField, WiggleField } from "./EaseParamFields";
 import { EASE_CURVES, EASE_LABELS, resolveEaseCurveTuple } from "./gsapAnimationConstants";
 import { roundToCenti } from "../../utils/rounding";
+import type { AnimationKeyframeTarget } from "../../hooks/gsapTweenSynth";
 
 export { MiniCurveSvg } from "./easeCurveSvg";
-
-const EASE_MODES = ["curve", "spring", "wiggle"] as const;
-type EaseMode = (typeof EASE_MODES)[number];
-
-const EasePresetGrid = function EasePresetGrid({
-  kind,
-  currentEase,
-  onSelect,
-}: {
-  kind: EaseMode;
-  currentEase: string;
-  onSelect: (ease: string) => void;
-}) {
-  return (
-    <div className="mb-2 grid max-h-56 grid-cols-4 gap-1 overflow-y-auto pr-0.5">
-      {EASE_PRESETS.filter((preset) => preset.kind === kind).map((preset) => {
-        const isActive = currentEase === preset.ease;
-        return (
-          <button
-            key={preset.id}
-            type="button"
-            data-ease-preset-id={preset.id}
-            role="menuitemradio"
-            aria-checked={isActive}
-            tabIndex={isActive ? 0 : -1}
-            onClick={() => onSelect(preset.ease)}
-            className={`flex flex-col items-center gap-0.5 rounded-md p-1 transition-colors ${
-              isActive ? "bg-panel-accent/10 ring-1 ring-panel-accent/30" : "hover:bg-neutral-800"
-            }`}
-            title={preset.label}
-          >
-            <MiniCurveSvg ease={preset.ease} active={isActive} />
-            <span
-              className={`text-center text-[8px] leading-none ${
-                isActive ? "text-panel-accent" : "text-neutral-500"
-              }`}
-            >
-              {preset.label}
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  );
-};
 
 const round2 = roundToCenti;
 
@@ -79,50 +43,6 @@ const VMIN = -HR / S; // bottom of visible view (undershoot headroom)
 const DRAG_VMAX = 2;
 const DRAG_VMIN = -1;
 const ACCENT = "#3CE6AC";
-
-type Pts = [number, number, number, number];
-const DEFAULT_CURVE: Pts = EASE_CURVES["power2.out"];
-const MODE_LABELS = { curve: "Curve", spring: "Spring", wiggle: "Wiggle" } satisfies Record<
-  EaseMode,
-  string
->;
-const DEFAULT_EASE_BY_MODE = {
-  curve: `custom(M0,0 C${DEFAULT_CURVE[0]},${DEFAULT_CURVE[1]} ${DEFAULT_CURVE[2]},${DEFAULT_CURVE[3]} 1,1)`,
-  spring: "spring(0.42)",
-  wiggle: "wiggle(3,easeInOut,0.12)",
-} satisfies Record<EaseMode, string>;
-
-function EaseModeToggle({ mode, onCommit }: { mode: EaseMode; onCommit: (ease: string) => void }) {
-  return (
-    <div
-      className="mb-2 grid grid-cols-3 rounded-md bg-black/20 p-0.5"
-      role="radiogroup"
-      aria-label="Ease editor mode"
-    >
-      {EASE_MODES.map((candidateMode) => {
-        const active = candidateMode === mode;
-        return (
-          <button
-            key={candidateMode}
-            type="button"
-            data-ease-mode={candidateMode}
-            role="radio"
-            aria-checked={active}
-            onClick={() => {
-              if (active) return;
-              onCommit(DEFAULT_EASE_BY_MODE[candidateMode]);
-            }}
-            className={`rounded px-2 py-1 text-[10px] font-medium transition-colors ${
-              active ? "bg-neutral-700 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"
-            }`}
-          >
-            {MODE_LABELS[candidateMode]}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 // Figma-style ease-type dropdown: the current ease (glyph + name) as a button
 // that opens the preset grid in a popover. This is where a preset is selected —
@@ -320,19 +240,36 @@ function EaseParameterField({
   return <EaseBezierField tuple={tuple} onCommit={onCommit} />;
 }
 
+/**
+ * How long an optimistically painted ease may outlive its commit. Long enough
+ * for a normal write-reparse-rerender round trip, short enough that a dropped
+ * write self-corrects while the author is still looking at the panel.
+ */
+const PENDING_EASE_TIMEOUT_MS = 2000;
+
 export function EaseCurveSection({
   ease,
   onCustomEaseCommit,
+  collidingAnimationTargets,
 }: {
   ease: string;
   onCustomEaseCommit: (ease: string) => void;
+  collidingAnimationTargets?: AnimationKeyframeTarget[];
 }) {
-  const springBounce = parseSpringBounce(ease);
+  // The ease this section painted optimistically, still waiting for its commit
+  // to round-trip back through the `ease` prop.
+  const [pendingEase, setPendingEase] = useState<string | null>(null);
+  // Every value committed and not yet seen coming back, oldest first. It takes
+  // the whole queue, not just the latest, to tell an older commit echoing back
+  // apart from an edit made somewhere else.
+  const inFlightEasesRef = useRef<string[]>([]);
+  const displayedEase = pendingEase ?? ease;
+  const springBounce = parseSpringBounce(displayedEase);
   const isSpring = springBounce !== null;
-  const wiggleConfig = parseWiggleEase(ease);
+  const wiggleConfig = parseWiggleEase(displayedEase);
   const isWiggle = wiggleConfig !== null;
   const mode: EaseMode = isSpring ? "spring" : isWiggle ? "wiggle" : "curve";
-  const curve = resolveEditableCurve(ease, springBounce);
+  const curve = resolveEditableCurve(displayedEase, springBounce);
 
   const [draft, setDraft] = useState<Pts | null>(null);
   const [hover, setHover] = useState<"p1" | "p2" | null>(null);
@@ -346,7 +283,42 @@ export function EaseCurveSection({
   // `ease` changes, `curve` already equals the draft, so the handoff is seamless.
   useEffect(() => {
     setDraft(null);
+    const inFlight = inFlightEasesRef.current;
+    const landed = inFlight.indexOf(ease);
+    if (landed < 0) {
+      // A value this section never sent: someone else edited the ease, so the
+      // real value wins over anything optimistic still on screen.
+      inFlight.length = 0;
+      setPendingEase(null);
+      return;
+    }
+    // One of this section's own commits came back. Everything sent before it
+    // is settled with it, but a NEWER commit may still be in flight, and
+    // repainting this older value while waiting for that one is the
+    // wiggle-then-spring-then-wiggle flicker of a fast double switch.
+    inFlight.splice(0, landed + 1);
+    if (inFlight.length === 0) setPendingEase(null);
   }, [ease]);
+
+  // A commit is fire-and-forget, so a write that is rejected or lands as a
+  // no-op never changes `ease`, and the optimistic value would sit on screen
+  // claiming a curve the composition does not have. Nothing downstream reports
+  // that failure, so the display is time-bounded instead: fall back to the
+  // committed truth when the round trip does not arrive.
+  useEffect(() => {
+    if (pendingEase === null) return;
+    const timer = setTimeout(() => {
+      inFlightEasesRef.current.length = 0;
+      setPendingEase(null);
+    }, PENDING_EASE_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [pendingEase]);
+
+  const commitEase = (nextEase: string) => {
+    inFlightEasesRef.current.push(nextEase);
+    setPendingEase(nextEase);
+    onCustomEaseCommit(nextEase);
+  };
 
   const activeTuple = draft ?? curve;
   const displayTuple = activeTuple ?? DEFAULT_CURVE;
@@ -358,8 +330,12 @@ export function EaseCurveSection({
   const a1 = { x: xToSvg(1), y: yToSvg(1) };
   const p1 = { x: xToSvg(x1), y: yToSvg(clampView(y1)) };
   const p2 = { x: xToSvg(x2), y: yToSvg(clampView(y2)) };
-  const curvePath = curvePathFor(ease, springBounce, wiggleConfig, displayTuple);
-  const showGraph = activeTuple !== null || isWiggle || ease === "hold";
+  // Read the OPTIMISTIC ease everywhere the graph is derived, so a mode switch
+  // paints immediately instead of waiting for the committed prop to come back.
+  const curvePath = curvePathFor(displayedEase, springBounce, wiggleConfig, displayTuple);
+  const showGraph = activeTuple !== null || isWiggle || displayedEase === "hold";
+  // `curve !== null` is what keeps Hold handle-free: it draws a graph (a flat
+  // step) but has no editable control points to drag.
   const showHandles = curve !== null && !isSpring && !isWiggle;
 
   const handlePointerDown = (handle: "p1" | "p2", e: React.PointerEvent) => {
@@ -394,10 +370,9 @@ export function EaseCurveSection({
     if (!draggingRef.current || !draft) return;
     draggingRef.current = null;
     const path = `M0,0 C${draft[0]},${draft[1]} ${draft[2]},${draft[3]} 1,1`;
-    // Clear after the synchronous parent commit settles. This also clears a
-    // same-string commit, where the `ease` dependency effect would not run.
-    onCustomEaseCommit(`custom(${path})`);
-    queueMicrotask(() => setDraft(null));
+    // Commit only — the draft stays on screen and is cleared by the effect above
+    // once the committed `ease` prop comes back, so the curve never flickers.
+    commitEase(`custom(${path})`);
   };
 
   const handleKeyDown = (handle: "p1" | "p2", event: React.KeyboardEvent<SVGCircleElement>) => {
@@ -406,20 +381,26 @@ export function EaseCurveSection({
     event.preventDefault();
     event.stopPropagation();
     setDraft(next);
-    onCustomEaseCommit(`custom(M0,0 C${next[0]},${next[1]} ${next[2]},${next[3]} 1,1)`);
-    queueMicrotask(() => setDraft(null));
+    // Same no-flicker contract as the pointer path: commit and let the effect
+    // clear the draft, rather than dropping it on the next microtask.
+    commitEase(`custom(M0,0 C${next[0]},${next[1]} ${next[2]},${next[3]} 1,1)`);
   };
 
   const top = yToSvg(1);
   const bottom = yToSvg(0);
   const left = xToSvg(0);
   const right = xToSvg(1);
-  const label = resolveEditorLabel(ease, springBounce, isWiggle);
+  const label = resolveEditorLabel(displayedEase, springBounce, isWiggle);
 
   return (
     <div className="rounded-lg bg-neutral-900/50 p-2">
-      <EaseTypeDropdown kind={mode} ease={ease} label={label} onSelect={onCustomEaseCommit} />
-      <EaseModeToggle mode={mode} onCommit={onCustomEaseCommit} />
+      <EaseTypeDropdown kind={mode} ease={displayedEase} label={label} onSelect={commitEase} />
+      {collidingAnimationTargets && collidingAnimationTargets.length > 1 && (
+        <p className="mb-1 text-[9px] text-neutral-500">
+          Applies to {collidingAnimationTargets.length} animations
+        </p>
+      )}
+      <EaseModeToggle mode={mode} onCommit={commitEase} />
       <span className="sr-only" aria-live="polite">
         {MODE_LABELS[mode]} ease editor selected
       </span>
@@ -560,7 +541,7 @@ export function EaseCurveSection({
             springBounce={springBounce}
             wiggleConfig={wiggleConfig}
             tuple={displayTuple}
-            onCommit={onCustomEaseCommit}
+            onCommit={commitEase}
           />
         </>
       ) : (

@@ -1,111 +1,32 @@
-import { type ReactNode } from "react";
-import type { GsapAnimation } from "@hyperframes/core/gsap-parser";
+import { Fragment, useId } from "react";
 import { BeatStrip, BeatBackgroundLines } from "./BeatStrip";
 import { TimelineClip } from "./TimelineClip";
 import { TimelineClipDiamonds } from "./TimelineClipDiamonds";
 import { TimelinePropertyLanes } from "./TimelinePropertyLanes";
 import { TimelineTrackHeader } from "./TimelineTrackHeader";
 import { resolveTrackKeyframeClip } from "./useTimelineTrackLayout";
-import type { TimelineKeyframeTarget } from "./timelineKeyframeIdentity";
-import type { MusicBeatAnalysis } from "@hyperframes/core/beats";
+import { trackDisplayNumber, trackDisplaySuffix } from "./timelineTrackDisplay";
+import { clipTimingStart } from "../../hooks/gsapShared";
 import { getTimelineEditCapabilities, resolveBlockedTimelineEditIntent } from "./timelineEditing";
-import type { TimelineTheme } from "./timelineTheme";
-import { CLIP_Y, CLIP_HANDLE_W, TRACK_H, getTimelineRowHeight } from "./timelineLayout";
+import { CLIP_Y, CLIP_HANDLE_W, TRACK_H } from "./timelineLayout";
+import { usePlayerStore, type TimelineElement } from "../store/playerStore";
 import {
-  usePlayerStore,
-  type TimelineElement,
-  type KeyframeCacheEntry,
-} from "../store/playerStore";
-import type { DraggedClipState, ResizingClipState, BlockedClipState } from "./useTimelineClipDrag";
-import {
+  isMultiDragActive,
   isMultiDragPassenger,
-  multiDragPassengerOffsetPx,
+  multiDragDeltaSeconds,
   type MultiDragPreviewInput,
+  multiDragPassengerOffsetPx,
 } from "./timelineMultiDragPreview";
-import type { TrackVisualStyle } from "./timelineIcons";
+import type { TimelineLaneBaseProps } from "./timelineLaneProps";
 import type { TimelineEditCallbacks } from "./timelineCallbacks";
-import { STUDIO_KEYFRAMES_ENABLED } from "../../components/editor/manualEditingAvailability";
 import { trackStudioKeyframeLaneExpand } from "../../telemetry/events";
 import { SPLIT_BOUNDARY_EPSILON_S } from "../../utils/timelineElementSplit";
 import { isAudioTimelineElement, isMusicTrack } from "../../utils/timelineInspector";
 import { renderClipChildren } from "./timelineClipChildren";
-
-/**
- * Props shared by the scroll container ({@link TimelineCanvas}) and the lane
- * renderer below. TimelineCanvas passes these straight through via spread, so
- * they are declared once here and both prop types compose from this base — no
- * duplicated prop list.
- */
-export interface TimelineLaneBaseProps {
-  pps: number;
-  contentOrigin: number;
-  contentGutter: number;
-  trackContentWidth: number;
-  theme: TimelineTheme;
-  displayTrackOrder: number[];
-  rowHeights: readonly number[];
-  trackOrder: number[];
-  tracks: [number, TimelineElement[]][];
-  trackStyles: Map<number, TrackVisualStyle>;
-  laneCounts: ReadonlyMap<string, number>;
-  selectedElementId: string | null;
-  selectedElementIds: Set<string>;
-  hoveredClip: string | null;
-  draggedClip: DraggedClipState | null;
-  blockedClipRef: React.RefObject<BlockedClipState | null>;
-  suppressClickRef: React.RefObject<boolean>;
-  scrollRef: React.RefObject<HTMLDivElement | null>;
-  renderClipContent?: (
-    element: TimelineElement,
-    style: { clip: string; label: string },
-  ) => ReactNode;
-  renderClipOverlay?: (element: TimelineElement) => ReactNode;
-  onDrillDown?: (element: TimelineElement) => void;
-  onSelectElement?: (element: TimelineElement | null) => void;
-  setHoveredClip: (key: string | null) => void;
-  setShowPopover: (v: boolean) => void;
-  setRangeSelection: (v: null) => void;
-  setResizingClip: (v: ResizingClipState | null) => void;
-  setDraggedClip: (v: DraggedClipState | null) => void;
-  setSelectedElementId: (id: string | null) => void;
-  syncClipDragAutoScroll: (x: number, y: number) => void;
-  shiftClickClipRef: React.RefObject<{
-    element: TimelineElement;
-    anchorX: number;
-    anchorY: number;
-  } | null>;
-  getPreviewElement: (element: TimelineElement) => TimelineElement;
-  getTrackStyle: (tag: string) => TrackVisualStyle;
-  keyframeCache?: Map<string, KeyframeCacheEntry>;
-  gsapAnimations: Map<string, GsapAnimation[]>;
-  selectedKeyframes: Set<string>;
-  currentTime: number;
-  onSeek?: (time: number) => void;
-  onSelectSegment?: (elementId: string, target: TimelineKeyframeTarget) => void;
-  onClickKeyframe?: (element: TimelineElement, target: TimelineKeyframeTarget) => void;
-  onShiftClickKeyframe?: (elementId: string, target: TimelineKeyframeTarget) => void;
-  onContextMenuKeyframe?: (
-    e: React.MouseEvent,
-    elementId: string,
-    target: TimelineKeyframeTarget,
-  ) => void;
-  onMoveKeyframe?: (
-    elementId: string,
-    keyframe: TimelineKeyframeTarget,
-    toClipPercentage: number,
-    propertyGroup?: string,
-    tweenPercentage?: number,
-    animationId?: string,
-  ) => Promise<boolean>;
-  onContextMenuClip?: (e: React.MouseEvent, element: TimelineElement) => void;
-  /**
-   * Right-click on EMPTY lane space (not on a clip — those preventDefault
-   * before this fires — not the gutter/ruler, not below the lanes). `time` is
-   * the timeline time (seconds) under the pointer on that lane.
-   */
-  onContextMenuLane?: (e: React.MouseEvent, track: number, time: number) => void;
-  beatAnalysis?: MusicBeatAnalysis | null;
-}
+import { TimelineTrackRow } from "./TimelineTrackRow";
+import { isTimelineClipActive } from "./useTimelineActiveClips";
+import { queryTimelineClipIndex } from "../lib/timelineClipIndex";
+import { getTimelineElementIdentity } from "../lib/timelineElementHelpers";
 
 interface TimelineLanesProps extends TimelineLaneBaseProps {
   /** Live-derived by TimelineCanvas from {@link TimelineLaneBaseProps.draggedClip}. */
@@ -126,7 +47,12 @@ export function TimelineLanes({
   trackContentWidth,
   theme,
   displayTrackOrder,
-  rowHeights,
+  rowGeometry,
+  virtualRows,
+  rowsVirtualized,
+  clipIndex,
+  renderTimeRange,
+  pinnedClipIdentities,
   trackOrder,
   tracks,
   trackStyles,
@@ -174,6 +100,12 @@ export function TimelineLanes({
   onRazorSplit,
   onRazorSplitAll,
 }: TimelineLanesProps) {
+  // Per-INSTANCE, so two timelines on one page (a mini-timeline in a modal
+  // beside the main one) cannot both mint `...-track-0` and have every caret's
+  // aria-controls resolve to whichever mounted first. React's useId embeds
+  // colons, which are legal in an id and in aria-controls but need escaping in
+  // a CSS `#id` selector, so they come out here and the prefix stays plain.
+  const lanesIdPrefix = `timeline-lanes${useId().replaceAll(":", "")}`;
   const expandedClipIds = usePlayerStore((s) => s.expandedClipIds);
   const toggleClipExpanded = usePlayerStore((s) => s.toggleClipExpanded);
   const toggleClipExpandedTracked = (key: string) => {
@@ -181,18 +113,45 @@ export function TimelineLanes({
     trackStudioKeyframeLaneExpand({ expanded: willExpand });
     toggleClipExpanded(key);
   };
+  const multiDragDelta =
+    multiDragPreview && isMultiDragActive(multiDragPreview)
+      ? multiDragDeltaSeconds(multiDragPreview)
+      : 0;
+  const actorWindows =
+    rowsVirtualized && multiDragPreview && multiDragDelta !== 0
+      ? [
+          {
+            range: {
+              start: renderTimeRange.start - multiDragDelta,
+              end: renderTimeRange.end - multiDragDelta,
+            },
+            identities: multiDragPreview.selectedKeys,
+          },
+        ]
+      : [];
   return (
-    <>
+    <div
+      role="list"
+      aria-label="Timeline tracks"
+      className={rowsVirtualized ? "absolute inset-0" : undefined}
+    >
       {
-        // NOTE (deliberate no-virtualization): lanes and their clips render via a
-        // plain `.map()` inside the scroll container rather than a windowing/virtualized
-        // list. NLE clip counts are small (dozens to low hundreds), so the DOM cost is
-        // bounded and virtualization's complexity isn't worth it. TODO: revisit and swap
-        // in a virtualizer if editorial workflows ever push very high clip counts.
         // fallow-ignore-next-line complexity
-        displayTrackOrder.map((trackNum, row) => {
-          const rowHeight = getTimelineRowHeight(row, rowHeights);
+        virtualRows.map(({ index: row, rowKey }) => {
+          const trackNum = displayTrackOrder[row];
+          if (trackNum === undefined) return null;
+          const displayNumber = trackDisplayNumber(displayTrackOrder, trackNum);
+          const rowHeight = rowGeometry.getRowHeight(row);
           const els = tracks.find(([t]) => t === trackNum)?.[1] ?? [];
+          const renderElements = rowsVirtualized
+            ? queryTimelineClipIndex(
+                clipIndex,
+                trackNum,
+                renderTimeRange,
+                pinnedClipIdentities,
+                actorWindows,
+              )
+            : els;
           const ts = trackStyles.get(trackNum) ?? getTrackStyle("");
           const isPendingTrack =
             draggedClip?.started === true && !trackOrder.includes(trackNum) && els.length === 0;
@@ -211,25 +170,44 @@ export function TimelineLanes({
           // The one keyframed element this track shows lanes for (selected, else
           // most lanes). A track can hold several elements; scoping to one keeps
           // their keyframes from cramming into a single row.
-          const keyframeClip = STUDIO_KEYFRAMES_ENABLED
-            ? resolveTrackKeyframeClip(els, laneCounts, selectedElementId, selectedElementIds)
-            : null;
+          const keyframeClip = resolveTrackKeyframeClip(
+            els,
+            laneCounts,
+            selectedElementId,
+            selectedElementIds,
+          );
           const keyframeClipKey = keyframeClip?.key ?? keyframeClip?.id;
           const keyframeClipExpanded =
             keyframeClipKey != null && expandedClipIds.has(keyframeClipKey);
+          // Minted here because this is the only place that sees BOTH ends of
+          // the disclosure: the caret in the sticky header and the diamond lanes
+          // on the canvas. Keyed by display row, not by `trackNum`, which is a
+          // fractional sort key and would mint ids like `...-0.16666666666666666`.
+          const lanesId = `${lanesIdPrefix}-track-${row}`;
           return (
-            <div
-              key={trackNum}
-              className="relative flex"
-              style={{
-                height: rowHeight,
-                background: rowBackground,
-                borderBottom: `1px solid ${theme.rowBorder}`,
-              }}
+            <TimelineTrackRow
+              key={rowKey}
+              index={row}
+              rowKey={rowKey}
+              rowCount={displayTrackOrder.length}
+              top={rowGeometry.getRowTop(row)}
+              height={rowHeight}
+              virtualized={rowsVirtualized}
+              background={rowBackground}
+              borderColor={theme.rowBorder}
             >
               <TimelineTrackHeader
                 trackNumber={trackNum}
-                trackLabel={els[0]?.label ?? els[0]?.domId ?? els[0]?.id ?? `Track ${trackNum}`}
+                // What gets announced. `trackNum` is a fractional z-order sort
+                // key, so it stays out of every label and in every callback.
+                trackDisplayNumber={displayNumber}
+                trackLabel={
+                  els[0]?.label ??
+                  els[0]?.domId ??
+                  els[0]?.id ??
+                  `Track${trackDisplaySuffix(displayNumber)}`
+                }
+                lanesId={lanesId}
                 contentOrigin={contentOrigin}
                 keyframeClip={keyframeClip}
                 clipCount={els.length}
@@ -279,6 +257,7 @@ export function TimelineLanes({
                       ? draggedClip.snapTime
                       : null
                   }
+                  renderTimeRange={rowsVirtualized ? renderTimeRange : undefined}
                 />
                 {/* Beat dots on the active track (the one holding the selection),
                     falling back to the music track when nothing is selected. */}
@@ -287,6 +266,7 @@ export function TimelineLanes({
                     beatTimes={beatAnalysis?.beatTimes}
                     beatStrengths={beatAnalysis?.beatStrengths}
                     pps={pps}
+                    renderTimeRange={rowsVirtualized ? renderTimeRange : undefined}
                   />
                 )}
                 {isPendingTrack && (
@@ -306,16 +286,14 @@ export function TimelineLanes({
                 )}
                 {
                   // fallow-ignore-next-line complexity
-                  els.map((el) => {
+                  renderElements.map((el) => {
                     const clipStyle = getTrackStyle(el.tag);
-                    const elementKey = el.key ?? el.id;
+                    const elementKey = getTimelineElementIdentity(el);
                     // Only the track's active keyframe clip shows expanded lanes;
                     // other clips (incl. siblings on a shared track) show compact
                     // diamonds on their own bar instead.
-                    const showsLanes =
-                      STUDIO_KEYFRAMES_ENABLED &&
-                      elementKey === keyframeClipKey &&
-                      keyframeClipExpanded;
+                    const isTrackKeyframeClip = elementKey === keyframeClipKey;
+                    const showsLanes = isTrackKeyframeClip && keyframeClipExpanded;
                     const capabilities = getTimelineEditCapabilities(el);
                     const isSelected =
                       selectedElementId === elementKey || selectedElementIds.has(elementKey);
@@ -326,7 +304,8 @@ export function TimelineLanes({
                     const clipKey = elementKey;
                     const isDraggingClip =
                       draggedClip?.started === true &&
-                      (draggedElement?.key ?? draggedElement?.id) === elementKey;
+                      draggedElement != null &&
+                      getTimelineElementIdentity(draggedElement) === elementKey;
                     if (isDraggingClip) return null;
                     const previewElement = getPreviewElement(el);
                     // Passenger of a live multi-drag: slide by the SAME formation
@@ -353,6 +332,7 @@ export function TimelineLanes({
                         isSelected={isSelected}
                         isHovered={hoveredClip === clipKey}
                         isDragging={false}
+                        isActive={isTimelineClipActive(previewElement, currentTime)}
                         hasCustomContent={!!renderClipContent}
                         capabilities={capabilities}
                         theme={theme}
@@ -492,42 +472,50 @@ export function TimelineLanes({
                           renderClipContent,
                           renderClipOverlay,
                         )}
-                        {STUDIO_KEYFRAMES_ENABLED &&
-                          !showsLanes &&
-                          keyframeCache?.get(elementKey) && (
-                            <TimelineClipDiamonds
-                              keyframesData={keyframeCache.get(elementKey)!}
-                              clipWidthPx={Math.max(previewElement.duration * pps, 4)}
-                              clipHeightPx={rowHeight - 2 * CLIP_Y}
-                              beatsActive={beatStripOnTrack}
-                              accentColor={clipStyle.accent}
-                              isSelected={isSelected}
-                              currentPercentage={
-                                previewElement.duration > 0
-                                  ? ((currentTime - previewElement.start) /
-                                      previewElement.duration) *
-                                    100
-                                  : 0
-                              }
-                              elementId={elementKey}
-                              selectedKeyframes={selectedKeyframes}
-                              onClickKeyframe={(_elId, target) =>
-                                onClickKeyframe?.(previewElement, target)
-                              }
-                              onShiftClickKeyframe={onShiftClickKeyframe}
-                              onContextMenuKeyframe={onContextMenuKeyframe}
-                              onMoveKeyframe={onMoveKeyframe}
-                              onSelectSegment={onSelectSegment}
-                              suppressClickRef={suppressClickRef}
-                            />
-                          )}
+                        {!showsLanes && keyframeCache?.get(elementKey) && (
+                          <TimelineClipDiamonds
+                            keyframesData={keyframeCache.get(elementKey)!}
+                            clipWidthPx={Math.max(previewElement.duration * pps, 4)}
+                            clipHeightPx={rowHeight - 2 * CLIP_Y}
+                            clipDuration={previewElement.duration}
+                            beatsActive={beatStripOnTrack}
+                            accentColor={clipStyle.accent}
+                            isSelected={isSelected}
+                            currentPercentage={
+                              previewElement.duration > 0
+                                ? ((currentTime - previewElement.start) / previewElement.duration) *
+                                  100
+                                : 0
+                            }
+                            elementId={elementKey}
+                            selectedKeyframes={selectedKeyframes}
+                            onClickKeyframe={(_elId, target) =>
+                              onClickKeyframe?.(previewElement, target)
+                            }
+                            onShiftClickKeyframe={onShiftClickKeyframe}
+                            onContextMenuKeyframe={onContextMenuKeyframe}
+                            onMoveKeyframe={onMoveKeyframe}
+                            onSelectSegment={onSelectSegment}
+                            suppressClickRef={suppressClickRef}
+                          />
+                        )}
                       </TimelineClip>
                     );
-                    const propertyLanes = showsLanes && (
+                    // Mounted for the track's keyframe clip in BOTH disclosure
+                    // states, so the header caret's aria-controls resolves while
+                    // collapsed too; collapsed just feeds it no animations, so
+                    // the wrapper renders empty. The key is stable across a
+                    // multi-drag: without it the passenger branch below remounts
+                    // this subtree and interrupts the gesture.
+                    const propertyLanes = isTrackKeyframeClip && (
                       <TimelinePropertyLanes
                         key={`${clipKey}-property-lanes`}
-                        animations={gsapAnimations.get(elementKey) ?? []}
-                        clipStart={previewElement.start}
+                        id={lanesId}
+                        animations={showsLanes ? (gsapAnimations.get(elementKey) ?? []) : []}
+                        // clipTimingStart, not the raw start: an expanded sub-comp
+                        // child's start is host-absolute while its tweens are
+                        // local to its own file.
+                        clipStart={clipTimingStart(previewElement)}
                         clipDuration={previewElement.duration}
                         clipLeftPx={previewElement.start * pps}
                         clipWidthPx={Math.max(previewElement.duration * pps, 4)}
@@ -555,7 +543,18 @@ export function TimelineLanes({
                         suppressClickRef={suppressClickRef}
                       />
                     );
-                    if (!isPassenger) return [clip, propertyLanes];
+                    // Keep one keyed top-level child per element. Returning an
+                    // array here makes React reconcile the outer array by
+                    // position, so a window shift remounts otherwise stable
+                    // clip keys and can tear down focus mid-reveal.
+                    if (!isPassenger) {
+                      return (
+                        <Fragment key={clipKey}>
+                          {clip}
+                          {propertyLanes}
+                        </Fragment>
+                      );
+                    }
                     return (
                       <div
                         key={clipKey}
@@ -574,10 +573,10 @@ export function TimelineLanes({
                   })
                 }
               </div>
-            </div>
+            </TimelineTrackRow>
           );
         })
       }
-    </>
+    </div>
   );
 }

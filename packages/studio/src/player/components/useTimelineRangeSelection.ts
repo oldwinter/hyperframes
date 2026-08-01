@@ -16,6 +16,7 @@ import {
   type MarqueeClipInput,
 } from "./timelineMarquee";
 import type { Rect } from "../../utils/marqueeGeometry";
+import type { TimelineRowGeometry } from "./timelineLayout";
 
 interface UseTimelineRangeSelectionInput {
   scrollRef: React.RefObject<HTMLDivElement | null>;
@@ -30,7 +31,7 @@ interface UseTimelineRangeSelectionInput {
   setShowPopover: (v: boolean) => void;
   elementsRef: React.RefObject<TimelineElement[]>;
   trackOrderRef: React.RefObject<number[]>;
-  rowHeightsRef: React.RefObject<readonly number[]>;
+  rowGeometryRef: React.RefObject<TimelineRowGeometry>;
   onSelectElement?: (element: TimelineElement | null) => void;
   contentOrigin: number;
 }
@@ -107,7 +108,7 @@ export function useTimelineRangeSelection({
   setShowPopover,
   elementsRef,
   trackOrderRef,
-  rowHeightsRef,
+  rowGeometryRef,
   onSelectElement,
   contentOrigin,
 }: UseTimelineRangeSelectionInput) {
@@ -176,12 +177,12 @@ export function useTimelineRangeSelection({
         marquee,
         elementsRef.current ?? [],
         trackOrderRef.current ?? [],
-        rowHeightsRef.current,
+        rowGeometryRef.current.rowHeights,
         ppsRef.current,
         contentOrigin,
       );
     },
-    [toContentPoint, elementsRef, trackOrderRef, rowHeightsRef, ppsRef, contentOrigin],
+    [toContentPoint, elementsRef, trackOrderRef, rowGeometryRef, ppsRef, contentOrigin],
   );
 
   const stopMarqueeAutoScroll = useCallback(() => {
@@ -268,6 +269,11 @@ export function useTimelineRangeSelection({
       if (!point || !scrollRect || isTimelineRulerPress(e.clientY, scrollRect.top)) {
         isDragging.current = true;
         setIsScrubbing(true);
+        // Seed the pending coordinate so a press with no pointermove still
+        // replays THIS x on pointerup. `updateScrubDrag` is the only other
+        // writer, so without this a plain click settles on the ref's initial
+        // 0 and clamps the playhead back to t=0.
+        pendingClientXRef.current = e.clientX;
         seekFromX(e.clientX);
         return;
       }

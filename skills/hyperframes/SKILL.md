@@ -99,11 +99,21 @@ Use the bare name without `/`. If the command fails, surface the error; do not r
 Broad feedback about how photographic media looks or behaves also routes to
 `/media-use`, even when the user never says “color grading” or “effect”: fix
 dark/flat/boring footage, stylize a clip, hide a face, or improve a media
-reveal. Load its media-treatment policy before editing; do not substitute a
-generic LUT, CSS filter/overlay, or opacity tween for an existing canonical
-treatment primitive. Keep text/layout/motion-only edits in their owning domain.
+reveal. Read `../media-use/references/media-treatments.md` before editing a
+treatment; it governs how footage is treated, never whether media may be used.
+Do not substitute a generic LUT, CSS filter/overlay, or opacity tween for an
+existing canonical treatment primitive. Keep text/layout/motion-only edits in
+their owning domain.
 During a build with important photographic media, include one grounded
 media-polish scan in the final quality pass; leaving suitable media unchanged is
 a valid result.
 
 Domain skills never take ownership of the end-to-end deliverable. Load only what the active workflow needs.
+
+## 中文执行导读
+
+这是 `hyperframes` 的中文 runtime 入口。
+
+中文视频或动效请求命中本 skill 时，先按下方上游路由和契约执行。输出说明使用简体中文；HTML、CSS、timing、seek-safe、render、CLI 命令、JSON/YAML key、路径、代码和验证阈值保持原样。
+
+# HyperFrames entry point

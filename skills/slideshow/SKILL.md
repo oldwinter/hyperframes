@@ -557,3 +557,11 @@ The slideshow lint rule checks:
 - No two main-line slides overlap in time.
 
 Fix all violations before previewing. A composition that fails lint will not parse correctly in the player.
+
+## 中文执行导读
+
+这是 `slideshow` 的中文 runtime 入口。
+
+中文视频或动效请求命中本 skill 时，先按下方上游路由和契约执行。输出说明使用简体中文；HTML、CSS、timing、seek-safe、render、CLI 命令、JSON/YAML key、路径、代码和验证阈值保持原样。
+
+# Slideshow authoring contract

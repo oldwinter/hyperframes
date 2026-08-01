@@ -542,13 +542,15 @@ Word-level transcripts (whisper output) are grouped into readable caption cues o
     | `--snapshots` | Write overview frames (annotated with labeled finding boxes when there are errors) plus `finding-NN-<code>.png` crops |
     | `--samples` / `--at` / `--at-transitions` | Control the seek grid (default 9 samples; `--at-transitions` adds tween boundaries) |
     | `--tolerance` | Allowed overflow in px before reporting (default 2) |
-    | `--timeout` | Initial settle budget in ms (default 3000) |
+    | `--timeout` | Initial render-ready budget in ms; also raises the page-navigation budget above its 10s floor (default 3000) |
     | `--no-contrast` | Skip the WCAG audit while iterating |
     | `--strict` | Exit non-zero on warnings too (default: only errors) |
     | `--caption-zone "<x0=..;y0=..;x1=..;y1=..>"` | Opt-in band gate: flags content whose center sits inside the fractional band (optional `severity`, `seek`) |
     | `--frame-check` | Opt-in media out-of-frame detection (img/svg/video/canvas) |
 
     Contrast failures are **errors** and include the sampled fg/bg colors, measured vs required ratio, and a suggested compliant color. Severity is persistence-aware: single-sample transients demote to info, held findings gate the exit code, and a frozen timeline on a 3s+ composition fails with `sweep_static`.
+
+    Escape hatches (mark intent in HTML, then re-run): `data-layout-allow-overflow` / `data-layout-allow-overlap` / `data-layout-allow-occlusion` / `data-layout-ignore` for the usual layout audits. For intentional lower-third copy under `--caption-zone`, mark `data-layout-allow-caption-zone` on the element or an ancestor (`closest`); it silences only `caption_zone_collision` (not overflow, overlap, occlusion, or contrast) — prefer the narrowest wrapper that owns the band copy.
 
     ### `beats`
 
@@ -612,7 +614,7 @@ Word-level transcripts (whisper output) are grouped into readable caption cues o
     | `--max-issues` | Maximum findings to print or return after static collapse (default: 80) |
     | `--strict` | Exit non-zero on warnings as well as errors |
 
-    Use `data-layout-allow-overflow` on an element or ancestor when overflow is intentional, such as a planned off-canvas entrance. Use `data-layout-ignore` for decorative elements that should not be audited. Use `data-layout-allow-overlap` on a text element that is intentionally stacked over another (for example a lower-third caption above a heading). Use `data-layout-allow-occlusion` when text is intentionally layered beneath another element (for example a caption behind a foreground prop).
+    Use `data-layout-allow-overflow` on an element or ancestor when overflow is intentional, such as a planned off-canvas entrance. Use `data-layout-ignore` for decorative elements that should not be audited. Use `data-layout-allow-overlap` on a text element that is intentionally stacked over another (for example a lower-third caption above a heading). Use `data-layout-allow-occlusion` when text is intentionally layered beneath another element (for example a caption behind a foreground prop). For `--caption-zone` / `data-layout-allow-caption-zone`, see [`check`](#check).
 
     `layout` remains available as a compatibility alias for the same visual inspection pass:
 

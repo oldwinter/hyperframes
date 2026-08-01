@@ -21,6 +21,7 @@ import { c } from "../ui/colors.js";
 import { findFFmpeg, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import { parseAngle, type Camera } from "./motionShotLayout.js";
 import type { Example } from "./_examples.js";
+import { resolveLocalBrowserGpuMode, type BrowserGpuMode } from "../browser/gpuPolicy.js";
 
 // Runs IN THE BROWSER (serialized into page.evaluate). Tilt the whole stage so
 // the REAL painted pixels are viewed from an orthogonal angle (FINDING [10]:
@@ -91,6 +92,15 @@ export function resolveSnapshotVideoFrameTime(input: {
 
   const sourceEnd = sourceDuration > 0 ? sourceDuration : relativeTime;
   return Math.max(0, Math.min(relativeTime, sourceEnd - 1 / 30));
+}
+
+/** Prefer the runtime's canonical absolute media start. The authored value is
+ * only a compatibility fallback for pages built with an older runtime. */
+export function resolveSnapshotVideoClipStart(input: {
+  authoredStart: number;
+  runtimeResolvedStart: number | null;
+}): number {
+  return input.runtimeResolvedStart ?? input.authoredStart;
 }
 
 export function requireSnapshotFfmpeg(ffmpegPath: string | undefined): string {
@@ -235,6 +245,7 @@ async function captureSnapshots(
     zoom?: ZoomTarget;
     zoomScale?: number;
     autoProxy?: boolean;
+    browserGpuMode?: BrowserGpuMode;
   },
 ): Promise<string[]> {
   const { bundleWithLocalizedFonts } = await import("../utils/bundleWithLocalizedFonts.js");
@@ -252,6 +263,7 @@ async function captureSnapshots(
     const { browser: chromeBrowser, page } = await openSettledCompositionPage(html, server.url, {
       renderReadyTimeoutMs: opts.timeout ?? 5000,
       renderReadyWarningSuffix: "snapshots may be inaccurate",
+      browserGpuMode: opts.browserGpuMode,
     });
 
     try {
@@ -399,10 +411,14 @@ async function captureSnapshots(
         if (cameraExpr) await page.evaluate(cameraExpr);
 
         if (injectVideoFramesBatch && syncVideoFrameVisibility) {
-          const candidates = await page.evaluate((t: number) => {
-            return Array.from(document.querySelectorAll("video[data-start]")).map((el) => {
+          const candidates = await page.evaluate(() => {
+            const runtimeWindow = window as Window & {
+              __hfResolveMediaStartSeconds?: (element: Element) => number;
+            };
+            return Array.from(document.querySelectorAll("video")).map((el) => {
               const v = el as HTMLVideoElement;
-              const start = parseFloat(v.dataset.start ?? "0") || 0;
+              const authoredStart = parseFloat(v.dataset.start ?? "0") || 0;
+              const runtimeResolvedStart = runtimeWindow.__hfResolveMediaStartSeconds?.(v);
               const rawRate = v.defaultPlaybackRate;
               const playbackRate =
                 Number.isFinite(rawRate) && rawRate > 0 ? Math.max(0.1, Math.min(5, rawRate)) : 1;
@@ -416,30 +432,43 @@ async function captureSnapshots(
                   : srcDur > 0
                     ? Math.max(0, (srcDur - mediaStart) / playbackRate)
                     : Number.POSITIVE_INFINITY;
-              let relTime = (t - start) * playbackRate + mediaStart;
-              if (v.loop && srcDur > mediaStart && relTime >= srcDur) {
-                relTime = mediaStart + ((relTime - mediaStart) % (srcDur - mediaStart));
-              }
               return {
                 id: v.id,
                 src: v.currentSrc || v.src,
-                start,
+                authoredStart,
+                runtimeResolvedStart:
+                  runtimeResolvedStart !== undefined && Number.isFinite(runtimeResolvedStart)
+                    ? runtimeResolvedStart
+                    : null,
                 duration,
                 srcDuration: srcDur,
-                relTime,
+                playbackRate,
+                mediaStart,
+                loop: v.loop,
               };
             });
-          }, time);
+          });
           const active = candidates.flatMap((candidate) => {
+            const start = resolveSnapshotVideoClipStart(candidate);
+            let relTime = (time - start) * candidate.playbackRate + candidate.mediaStart;
+            if (
+              candidate.loop &&
+              candidate.srcDuration > candidate.mediaStart &&
+              relTime >= candidate.srcDuration
+            ) {
+              relTime =
+                candidate.mediaStart +
+                ((relTime - candidate.mediaStart) % (candidate.srcDuration - candidate.mediaStart));
+            }
             if (!candidate.id || !candidate.src) return [];
             const frameTime = resolveSnapshotVideoFrameTime({
               globalTime: time,
-              clipStart: candidate.start,
+              clipStart: start,
               clipDuration: candidate.duration,
-              relativeTime: candidate.relTime,
+              relativeTime: relTime,
               sourceDuration: candidate.srcDuration,
             });
-            return frameTime === null ? [] : [{ ...candidate, relTime: frameTime }];
+            return frameTime === null ? [] : [{ ...candidate, start, relTime: frameTime }];
           });
 
           const updates: Array<{ videoId: string; dataUri: string }> = [];
@@ -612,6 +641,12 @@ export default defineCommand({
         "Auto-transcode browser-hostile video codecs for snapshots (default: on; overrides hyperframes.json media.autoProxy)",
       default: undefined,
     },
+    "browser-gpu": {
+      type: "boolean",
+      description:
+        "Use hardware browser GPU capture; pass --no-browser-gpu for deterministic SwiftShader (default: auto-detect, PRODUCER_BROWSER_GPU_MODE overrides)",
+      default: undefined,
+    },
   },
   async run({ args }) {
     const project = resolveProject(args.dir);
@@ -661,6 +696,7 @@ export default defineCommand({
         zoom: zoomTarget,
         zoomScale,
         autoProxy: args.proxy as boolean | undefined,
+        browserGpuMode: resolveLocalBrowserGpuMode(args["browser-gpu"] as boolean | undefined),
       });
 
       if (paths.length === 0) {

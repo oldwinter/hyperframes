@@ -33,6 +33,7 @@ function renderDiamonds(onClickKeyframe = vi.fn()) {
         }}
         clipWidthPx={200}
         clipHeightPx={48}
+        clipDuration={10}
         accentColor="#4ba3d2"
         isSelected
         currentPercentage={0}
@@ -46,10 +47,85 @@ function renderDiamonds(onClickKeyframe = vi.fn()) {
 }
 
 describe("TimelineClipDiamonds", () => {
-  // Dense rows narrow the DIAMOND so neighbours stay individually readable, but
-  // the hit box floors at KF_MIN_HIT_W — a gap-sized target gets unusable
-  // (~7px) at the zoom floor.
-  it("narrows dense keyframe visuals while flooring their hit regions", () => {
+  it("marks only the nearest keyframe in a dense lane as under the playhead", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => {
+      root.render(
+        <TimelineDiamondLane
+          keyframesData={{
+            format: "percentage",
+            keyframes: [34.6, 34.8, 35, 35.2, 35.4].map((percentage) => ({
+              percentage,
+              propertyGroup: "position",
+              properties: { x: percentage },
+            })),
+          }}
+          clipWidthPx={4000}
+          clipHeightPx={48}
+          clipDuration={12}
+          accentColor="#4ba3d2"
+          isSelected
+          currentPercentage={35.05}
+          elementId="clip-1"
+          selectedKeyframes={new Set()}
+          groupAware
+        />,
+      );
+    });
+
+    expect(host.querySelectorAll('[data-keyframe-at-playhead="true"]')).toHaveLength(1);
+    expect(host.querySelector<HTMLButtonElement>('[data-keyframe-at-playhead="true"]')?.title).toBe(
+      "35%",
+    );
+    act(() => root.unmount());
+  });
+
+  it("distinguishes a playhead match from an explicitly selected keyframe", () => {
+    const selectedKey = timelineKeyframeSelectionKey("clip-1", {
+      percentage: 60,
+      propertyGroup: "position",
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => {
+      root.render(
+        <TimelineDiamondLane
+          keyframesData={{
+            format: "percentage",
+            keyframes: [
+              { percentage: 40, propertyGroup: "position", properties: { x: 40 } },
+              { percentage: 60, propertyGroup: "position", properties: { x: 60 } },
+            ],
+          }}
+          clipWidthPx={1200}
+          clipHeightPx={48}
+          clipDuration={10}
+          accentColor="#4ba3d2"
+          isSelected
+          currentPercentage={40}
+          elementId="clip-1"
+          selectedKeyframes={new Set([selectedKey])}
+          groupAware
+        />,
+      );
+    });
+
+    const playheadDiamond = host.querySelector<HTMLButtonElement>('button[title="40%"]');
+    const selectedDiamond = host.querySelector<HTMLButtonElement>('button[title="60%"]');
+    expect(playheadDiamond?.dataset.keyframeAtPlayhead).toBe("true");
+    expect(playheadDiamond?.dataset.keyframeSelected).toBe("false");
+    expect(playheadDiamond?.querySelector("path:last-child")?.getAttribute("fill")).toBe("#a3a3a3");
+    expect(playheadDiamond?.querySelector('path[stroke="#4ba3d2"]')).not.toBeNull();
+    expect(selectedDiamond?.dataset.keyframeAtPlayhead).toBe("false");
+    expect(selectedDiamond?.dataset.keyframeSelected).toBe("true");
+    expect(selectedDiamond?.querySelector("path:last-child")?.getAttribute("fill")).toBe("#4ba3d2");
+    act(() => root.unmount());
+  });
+
+  it("keeps dense keyframe visuals full-size while bounding their hit regions", () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -80,7 +156,7 @@ describe("TimelineClipDiamonds", () => {
     expect(diamonds).toHaveLength(3);
     for (const diamond of diamonds) {
       expect(Number.parseFloat(diamond.style.width)).toBeCloseTo(12);
-      expect(Number(diamond.querySelector("svg")?.getAttribute("width"))).toBeCloseTo(8.8);
+      expect(Number(diamond.querySelector("svg")?.getAttribute("width"))).toBe(22);
     }
     act(() => root.unmount());
   });
@@ -123,6 +199,7 @@ describe("TimelineClipDiamonds", () => {
           keyframesData={{ format: "percentage", keyframes: [groupedKeyframe] }}
           clipWidthPx={200}
           clipHeightPx={48}
+          clipDuration={10}
           accentColor="#4ba3d2"
           isSelected
           currentPercentage={-10}
@@ -271,6 +348,7 @@ describe("TimelineClipDiamonds", () => {
           }}
           clipWidthPx={200}
           clipHeightPx={48}
+          clipDuration={10}
           accentColor="#4ba3d2"
           isSelected
           currentPercentage={0}
@@ -356,6 +434,7 @@ describe("TimelineClipDiamonds", () => {
           }}
           clipWidthPx={200}
           clipHeightPx={48}
+          clipDuration={10}
           accentColor="#4ba3d2"
           isSelected
           currentPercentage={0}
@@ -620,6 +699,7 @@ describe("TimelineClipDiamonds", () => {
           }}
           clipWidthPx={200}
           clipHeightPx={48}
+          clipDuration={10}
           accentColor="#4ba3d2"
           isSelected
           currentPercentage={0}
@@ -641,7 +721,7 @@ describe("TimelineClipDiamonds", () => {
     act(() => root.unmount());
   });
 
-  const renderSegmentLane = (lastAmbiguous: boolean) => {
+  const renderSegmentLane = (lastAmbiguous: boolean, clipWidthPx = 200) => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -658,9 +738,20 @@ describe("TimelineClipDiamonds", () => {
         <TimelineDiamondLane
           keyframesData={{
             format: "percentage",
-            keyframes: [kf(0), kf(50), kf(100, { easeAmbiguous: lastAmbiguous })],
+            keyframes: [
+              kf(0),
+              kf(50),
+              kf(100, {
+                collidingAnimationTargets: lastAmbiguous
+                  ? [
+                      { animationId: "anim-1", tweenPercentage: 100 },
+                      { animationId: "anim-2", tweenPercentage: 75 },
+                    ]
+                  : undefined,
+              }),
+            ],
           }}
-          clipWidthPx={200}
+          clipWidthPx={clipWidthPx}
           clipHeightPx={48}
           accentColor="#4ba3d2"
           isSelected
@@ -675,15 +766,16 @@ describe("TimelineClipDiamonds", () => {
     return { host, root };
   };
 
-  it("hides the inline ease button on an ambiguous merged segment", () => {
-    // Segments 0->50 and 50->100; the 50->100 segment ends on the ambiguous
-    // keyframe, so its hover/ease-button area is not rendered.
+  it("shows the inline ease button on a colliding merged segment (bulk edit)", () => {
+    // Both segments (0->50, 50->100) render their ease button; the 50->100
+    // segment ends on a keyframe shared by two animations and the button now
+    // bulk-edits both rather than being hidden.
     const { host, root } = renderSegmentLane(true);
-    expect(host.querySelectorAll("[data-keyframe-ease-segment]").length).toBe(1);
+    expect(host.querySelectorAll("[data-keyframe-ease-segment]").length).toBe(2);
     act(() => root.unmount());
   });
 
-  it("keeps the inline ease button on unambiguous merged segments", () => {
+  it("shows the inline ease button on single-animation merged segments", () => {
     const { host, root } = renderSegmentLane(false);
     expect(host.querySelectorAll("[data-keyframe-ease-segment]").length).toBe(2);
     act(() => root.unmount());
@@ -698,6 +790,21 @@ describe("TimelineClipDiamonds", () => {
     expect(segment?.style.pointerEvents).toBe("none");
     expect(ease?.style.pointerEvents).toBe("auto");
     expect(Number(segment?.style.zIndex)).toBeGreaterThan(Number(diamond?.style.zIndex));
+    // Room to spare here, so the button carries the 24x24 WCAG 2.5.8 overlay.
+    expect(ease?.className).toContain("before:h-6");
+    act(() => root.unmount());
+  });
+
+  it("drops the 24x24 ease overlay when the segment is too narrow to hold it", () => {
+    // The segment wrapper outranks the diamonds, so an overlay wider than the
+    // clear span between them would steal their clicks at fit zoom. 40px of clip
+    // across three keyframes leaves well under 24px of clear span per segment.
+    const { host, root } = renderSegmentLane(false, 40);
+    const ease = host.querySelector<HTMLButtonElement>("[data-keyframe-ease-button]");
+
+    expect(ease).not.toBeNull();
+    expect(ease?.className).not.toContain("before:h-6");
+    expect(ease?.style.width).toBe("16px");
     act(() => root.unmount());
   });
 

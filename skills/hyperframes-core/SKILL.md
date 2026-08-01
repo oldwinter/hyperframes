@@ -53,6 +53,13 @@ The standalone root needs an explicit **sized box** (`width`/`height` in px), an
 
 Each composition registers **exactly one** `gsap.timeline({ paused: true })` at `window.__timelines["<id>"]` (key = root `data-composition-id`), built **synchronously** at page load. Render duration = root `data-duration`, not timeline length. Don't manually nest sub-timelines into the host. Full contract (incl. non-GSAP runtimes) → `references/determinism-rules.md` + `hyperframes-animation/adapters/`.
 
+### First-pass lint gotchas (a guaranteed first build failure)
+
+Two rules that `lint` **does** catch, but only after the fact — write them right the first time:
+
+- The **root** composition element must carry `data-start="0"` (alongside `data-composition-id`/`data-width`/`data-height`); omitting it fails `lint` with `root_composition_missing_data_start`.
+- Never pair a CSS initial `transform` with a GSAP tween on the **same** property — the CSS value and the tween's start fight and `lint` rejects it with `gsap_css_transform_conflict`. Set the initial state inside the tween with `gsap.fromTo(el, { x: -40 }, { x: 0 })` instead of a CSS `transform: translateX(-40px)`.
+
 ### Non-negotiable rules (silent bugs automated gates may miss)
 
 Surfaced here; full rationale in the linked reference. Do not violate:
@@ -80,3 +87,11 @@ Use `hyperframes-cli` for command details
 - [ ] Projects with sub-compositions: `npx hyperframes snapshot --at <midpoints>` and eyeball each frame
 - [ ] `npx hyperframes preview` for review (the user can edit anything in Studio's timeline)
 - [ ] `npx hyperframes render` only after the user approves
+
+## 中文执行导读
+
+这是 `hyperframes-core` 的中文 runtime 入口。
+
+中文视频或动效请求命中本 skill 时，先按下方上游路由和契约执行。输出说明使用简体中文；HTML、CSS、timing、seek-safe、render、CLI 命令、JSON/YAML key、路径、代码和验证阈值保持原样。
+
+# HyperFrames Core

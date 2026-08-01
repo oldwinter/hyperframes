@@ -4,6 +4,7 @@
  * keyframe-identity helper live here; the rendering lives there.
  */
 import type { TimelineKeyframeTarget } from "./timelineKeyframeIdentity";
+import type { AnimationKeyframeTarget } from "../../hooks/gsapTweenSynth";
 
 export interface TimelineDiamondKeyframe {
   percentage: number;
@@ -13,9 +14,8 @@ export interface TimelineDiamondKeyframe {
   animationId?: string;
   properties: Record<string, number | string>;
   ease?: string;
-  /** Set when 2+ source animations collide at this percentage (a single inline
-   *  ease button can't target one): the collapsed row hides the button here. */
-  easeAmbiguous?: boolean;
+  /** Source animation/keyframe targets that collide at this clip percentage. */
+  collidingAnimationTargets?: AnimationKeyframeTarget[];
 }
 
 interface KeyframeCacheEntry {
@@ -29,6 +29,8 @@ export interface TimelineClipDiamondsProps {
   keyframesData: KeyframeCacheEntry;
   clipWidthPx: number;
   clipHeightPx: number;
+  /** Needed to compare the playhead to keyframes in output-frame time. */
+  clipDuration: number;
   /** Beat-dot strip is shown on this track → shrink diamonds + drop them into
    *  the bottom half so they clear the strip at the top. */
   beatsActive?: boolean;
@@ -70,7 +72,10 @@ export interface TimelineDiamondLaneProps extends Omit<
   | "onContextMenuKeyframe"
   | "onMoveKeyframe"
   | "onSelectSegment"
+  | "clipDuration"
 > {
+  /** Isolated lanes may omit timing; without it no playhead diamond is marked. */
+  clipDuration?: number;
   groupAware?: boolean;
   globalEase?: string;
   onSelectSegment?: (target: TimelineKeyframeTarget) => void;
@@ -116,5 +121,6 @@ export function keyframeTarget(keyframe: TimelineDiamondKeyframe): TimelineKeyfr
     tweenPercentage: keyframe.tweenPercentage,
     propertyGroup: keyframe.propertyGroup,
     animationId: keyframe.animationId,
+    collidingAnimationTargets: keyframe.collidingAnimationTargets,
   };
 }
