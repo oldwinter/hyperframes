@@ -109,6 +109,7 @@ media-polish scan in the final quality pass; leaving suitable media unchanged is
 a valid result.
 
 Domain skills never take ownership of the end-to-end deliverable. Load only what the active workflow needs.
+
 ## 中文执行导读
 
 这是 `hyperframes` 的中文 runtime 入口。

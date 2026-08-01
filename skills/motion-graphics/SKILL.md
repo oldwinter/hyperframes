@@ -174,6 +174,7 @@ Verify the output exists, is non-empty, and has the intended duration. The final
     renders/video.mp4
   ```
 - **Registration:** in `hyperframes` router — add the "design-led short motion graphic" intent + Workflow description; carve the motion-graphics triggers out of `/general-video`; add reverse Do-NOT-use edges. See `motion-graphics-genre.md` §5-7.
+
 ## 中文执行导读
 
 这是 `motion-graphics` 的中文 runtime 入口。

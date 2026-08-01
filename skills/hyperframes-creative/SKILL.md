@@ -69,6 +69,7 @@ Animation analysis (`animation-map.mjs`) lives in `hyperframes-animation/scripts
 - Do not require a design system for a minimal technical composition.
 - Do not add extra scenes, narration, music, captions, or transitions unless the request calls for them or you first propose the expansion.
 - Keep recipe references task-specific; do not read every reference for simple edits.
+
 ## 中文执行导读
 
 这是 `hyperframes-creative` 的中文 runtime 入口。

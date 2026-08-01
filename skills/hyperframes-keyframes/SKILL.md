@@ -227,6 +227,7 @@ A helper-selector shot is not proof. An onion shot over a broken full frame is n
 ## Done
 
 Run `hyperframes lint`, `hyperframes check`, `hyperframes keyframes`, one focused `--shot`, and snapshots. Confirm first frame, proof poses, final-minus-hold, exact final, subject-owned motion, and no debug overlays.
+
 ## 中文执行导读
 
 这是 `hyperframes-keyframes` 的中文 runtime 入口。

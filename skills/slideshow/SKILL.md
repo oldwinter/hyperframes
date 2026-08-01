@@ -557,6 +557,7 @@ The slideshow lint rule checks:
 - No two main-line slides overlap in time.
 
 Fix all violations before previewing. A composition that fails lint will not parse correctly in the player.
+
 ## 中文执行导读
 
 这是 `slideshow` 的中文 runtime 入口。

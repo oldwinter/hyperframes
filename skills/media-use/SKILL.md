@@ -94,6 +94,7 @@ Rules that keep this a help, not nagware: **grounded, not generic** (no signal �
 | install + auth, provider table, RAM ladders, `--local-only`, `--provider` | `references/setup-providers.md`  |
 | remembered preferences + frozen recipes (user memory)                     | `references/memory.md`           |
 | ownership matrix, usage stats, telemetry, privacy (maintainer-facing)     | `references/meta.md`             |
+
 ## 中文执行导读
 
 这是 `media-use` 的中文 runtime 入口。

@@ -231,6 +231,7 @@ The reusable, domain-agnostic shot shapes live in `../hyperframes-animation/blue
 | `[../hyperframes-core/references/frame-worker-core.md](../hyperframes-core/references/frame-worker-core.md)`                                                | Step 5: the shared worker contract (packet builder prepends it to the delta).  |
 | `[sub-agents/frame-worker.md](sub-agents/frame-worker.md)`                                                                                                  | Step 5: the workflow's frame-worker delta.                                     |
 | `[../hyperframes-core/references/subagent-dispatch.md](../hyperframes-core/references/subagent-dispatch.md)`                                                | Step 5: dispatch sub-agents safely.                                            |
+
 ## 中文执行导读
 
 这是 `faceless-explainer` 的中文 runtime 入口。

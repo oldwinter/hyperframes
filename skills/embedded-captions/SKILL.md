@@ -256,6 +256,7 @@ The full **embed-track** playbook lives in **[references/composition-craft.md](r
 - Matting weights are NOT bundled: `matte.cjs` shells the hyperframes CLI's `remove-background`, which downloads u2net_human_seg (~168 MB, Apache-2.0) once to `~/.cache/hyperframes/background-removal/models/`. First prepare on a fresh machine needs network for that one download.
 
 If a hard dependency is missing, STOP and ask the user — don't silently skip steps.
+
 ## 中文执行导读
 
 这是 `embedded-captions` 的中文 runtime 入口。

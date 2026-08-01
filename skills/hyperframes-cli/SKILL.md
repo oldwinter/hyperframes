@@ -137,6 +137,7 @@ npx hyperframes keyframes <project-dir> --json
 ```
 
 `present` serves a navigable deck with presenter and audience synchronization. `beats` is the standalone Studio beat-grid utility defined in `references/beats.md`. `keyframes` surfaces seek-safe animation and motion-path diagnostics.
+
 ## 中文执行导读
 
 这是 `hyperframes-cli` 的中文 runtime 入口。

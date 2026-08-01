@@ -206,6 +206,7 @@ music-to-video/
   scripts/      analyze-beatgrid.py · assemble-index.mjs · validate-plan.mjs · stage-assets.mjs · lib/storyboard.mjs
   sub-agents/   frame-worker.md   ← the one subagent (one per frame)
 ```
+
 ## 中文执行导读
 
 这是 `music-to-video` 的中文 runtime 入口。

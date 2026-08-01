@@ -130,6 +130,7 @@ Storyboard files follow a grammar you can parse mechanically — don't eyeball, 
 ## Determinism
 
 Never leave a Figma URL in the composition — freeze first. Never emit `repeat: -1`. Timelines paused, finite, literal `window.__timelines` keys. All Figma I/O at import time; render sees local files only.
+
 ## 中文执行导读
 
 这是 `figma` 的中文 runtime 入口。
