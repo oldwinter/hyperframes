@@ -154,3 +154,10 @@ A run is complete only when:
 - the rendered file is verified when a render was requested.
 
 After final approval, offer once to freeze the run as a recipe, following `../hyperframes-core/references/review-loop.md` § 4.
+## 中文执行导读
+
+这是 `general-video` 的中文 runtime 入口。
+
+中文视频或动效请求命中本 skill 时，先按下方上游路由和契约执行。输出说明使用简体中文；HTML、CSS、timing、seek-safe、render、CLI 命令、JSON/YAML key、路径、代码和验证阈值保持原样。
+
+# General video

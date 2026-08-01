@@ -31,6 +31,15 @@
 
 HyperFrames is an open-source framework for turning HTML, CSS, media, and seekable animations into deterministic MP4 videos. Use it locally with the CLI, from AI coding agents with skills, or as the rendering core behind hosted authoring workflows.
 
+## 中文版安装（oldwinter fork）
+
+这是上游 `heygen-com/hyperframes` 的中文化 fork。安装后，Agent runtime 从 `skills/` 读取中文执行导读和上游 HyperFrames 技术契约。
+
+```bash
+npx skills add oldwinter/hyperframes --full-depth
+codex plugin marketplace add oldwinter/hyperframes
+```
+
 ## Quick Start
 
 ### With an AI coding agent

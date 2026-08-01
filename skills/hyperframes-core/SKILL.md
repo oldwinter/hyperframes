@@ -87,3 +87,10 @@ Use `hyperframes-cli` for command details
 - [ ] Projects with sub-compositions: `npx hyperframes snapshot --at <midpoints>` and eyeball each frame
 - [ ] `npx hyperframes preview` for review (the user can edit anything in Studio's timeline)
 - [ ] `npx hyperframes render` only after the user approves
+## 中文执行导读
+
+这是 `hyperframes-core` 的中文 runtime 入口。
+
+中文视频或动效请求命中本 skill 时，先按下方上游路由和契约执行。输出说明使用简体中文；HTML、CSS、timing、seek-safe、render、CLI 命令、JSON/YAML key、路径、代码和验证阈值保持原样。
+
+# HyperFrames Core
