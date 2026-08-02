@@ -3,6 +3,27 @@ title: Color Grading
 description: "Correct and creatively grade video or image media with presets, scopes, color wheels, curves, HSL selections, and custom LUTs."
 ---
 
+## 中文执行导读
+
+本指南面向真实的 `<video>` 和 `<img>` 媒体，说明如何在 Studio 或 Agent/CLI
+中完成校色、风格化和 LUT 处理。先分析源素材，再使用可验证的
+`data-color-grading` payload；预览与渲染遵循相同的 SDR/Rec.709 shader 契约。
+参数、命令、JSON key、路径和数值边界保持英文契约原样。
+
+像素级处理按固定顺序执行：
+`adjust -> wheels -> curves -> hueCurves -> secondaries -> lut -> details -> effects`。
+`intensity` 只混合主 grading（包括 `adjust`、`wheels`、`curves`、`hueCurves`、
+`secondaries` 和 LUT），不会控制 `details` 或 `effects`；需要动画时优先使用
+文中列出的 CSS custom properties，其他效果只有在验证 `data-color-grading`
+按时间线重写确实生效后才能这样驱动。
+
+本次新增的两个重点是“Animating a Grade”和“Limiting a Grade to Part of the
+Frame”：色彩选择按 hue、saturation、luma 取值，不提供 mask、shape 或 tracking。
+需要只处理画面一部分时，应把区域拆成独立媒体层，用原始背景片和带 matte 的 cutout
+组合，再通过 `clip-path` 限制 graded layer；注意 premultiplied alpha 可能造成黑边。
+最终应检查真实帧、源素材是否包含效果需要改变的颜色和边缘，并把静态效果与时间线
+动画的验证结果一并纳入交付。
+
 Use Color Grading to correct and creatively grade real `<video>` and `<img>`
 media in Studio or through an agent with the same validated SDR/Rec.709 shader
 contract in preview and render.

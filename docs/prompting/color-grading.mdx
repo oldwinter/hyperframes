@@ -3,6 +3,25 @@ title: Color grading and film effects
 description: "Grade media with a fixed-order pipeline — tonal work, hue keys, print and analogue treatments — and know why the source matters more than the payload."
 ---
 
+## 中文执行导读
+
+本章通过十组 A/B render 说明怎样为真实媒体提出可执行的 color grading prompt，
+并展示 prompt 编译出的 payload。重点不是堆叠参数，而是先确认源素材真的有可被
+处理的颜色、层次或边缘：hue key、two-ink print、Kuwahara 等效果如果源片已经
+没有对应信息，技术上成功也可能看不出结果。
+
+Grade 只附着在单个 `<img>` 或 `<video>` 的 `data-color-grading` 上，不会改变
+文字、卡片或 captions。payload 始终按
+`adjust -> wheels -> curves -> hueCurves -> secondaries -> lut -> details -> effects`
+执行；按颜色值选择而不是按位置选择，契约没有 mask、shape 或 tracked region。
+要保护或处理局部画面，应先准备 matte/cutout，把 graded media 拆成独立层，再用
+`clip-path` 组织合成，并使用原始背景片避免黑边。
+
+提示词还应明确效果的语义和验证方式：`intensity` 只控制主 grade，grain、bloom、
+halftone、CRT/tape 等效果需要单独驱动或保持静态；动画从 identity 开始，并在
+代表性真实帧上检查。HUD 等 authored overlay 位于媒体 canvas 之上，不能误认为
+grade 会处理它；固定 `clip-path` 也只适合主体几乎不移动的素材。
+
 Every chapter so far has built the image. This one changes what the image appears to have been *recorded on*. A grade is not decoration applied at the end; it is a claim about the medium — that this came off tape, or a press, or a tube, or a camera with a particular stock in it. Viewers read that claim instantly and they read it whether or not you meant it.
 
 Grading attaches to a single `<img>` or `<video>` through a `data-color-grading` payload. It never touches your text, your cards, or your captions — only the pixels of the media element it is on. The full contract lives in the [Color Grading guide](/guides/color-grading); this chapter is about what to *ask for*, and about the three ways these prompts go wrong.

@@ -15,6 +15,13 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 >
 Hardens the media probe against malformed and hostile input — ffprobe invocation, AAC duration refinement, frame-rate parsing and PNG inspection — and adds a color grading chapter to the Prompt Guide.
 
+### 中文摘要
+
+本版本同时收紧媒体探测的输入、大小、编解码和 PNG 解析边界，并新增色彩分级 Prompt
+Guide 章节。Color Grading guide 现在说明如何动画化可 tween 的 grade 属性，以及
+如何通过独立媒体层、matte 和 `clip-path` 处理局部画面；新增内容保留上游命令、
+链接和技术契约不变。
+
 ## Fixes
 
 - **Engine:** Harden the ffprobe invocation — reject stdin input, decode stdout correctly, and bound its size ([9e275423e](https://github.com/heygen-com/hyperframes/commit/9e275423e2f44e37d73d5b7372a3ead3ba95cf75))
