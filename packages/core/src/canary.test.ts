@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { canaryBucket, evaluateCanary, parseCanaryOverride, type CanaryInput } from "./canary.js";
 import { CANARIES, canaryEnvVar, findCanary, overdueCanaries } from "./canaryRegistry.js";
-import { CANARY_FEATURE_PREFIX, canaryFeatureKey, canaryFeatureProperties } from "./canary.js";
+import {
+  CANARY_FEATURE_PREFIX,
+  canaryFeatureKey,
+  canaryFeatureProperties,
+  canaryReasonKey,
+} from "./canary.js";
 
 const base = (over: Partial<CanaryInput> = {}): CanaryInput => ({
   feature: "test-feature",
@@ -290,8 +297,24 @@ describe("registry", () => {
   // surface. This canary's own description says "ramp only alongside the
   // per-install circuit breaker" — without an assertion, bumping it to 5
   // before that wiring lands would go green.
-  it("keeps de-parallel-router at 0% until the circuit breaker is wired", () => {
-    expect(findCanary("de-parallel-router")?.percentage).toBe(0);
+  // The registry is data, so a ramp is a one-line edit with no code review
+  // surface. The previous version enforced "ramp only alongside the circuit
+  // breaker" by pinning the percentage to 0 — which blocks the ramp forever
+  // and never checks the wiring it names.
+  //
+  // Assert the wiring instead: a non-zero percentage is allowed only while
+  // the CLI render path really gates on this canary AND still consults the
+  // per-install breaker. Ramping without the gate would enrol everybody at
+  // once, which is the whole thing the ramp exists to prevent.
+  it("only ramps de-parallel-router while the CLI render path gates on it", () => {
+    const pct = findCanary("de-parallel-router")?.percentage ?? 0;
+    if (pct === 0) return;
+    const renderSrc = readFileSync(
+      join(import.meta.dirname, "..", "..", "cli", "src", "commands", "render.ts"),
+      "utf8",
+    );
+    expect(renderSrc).toContain('isCanaryEnabled("de-parallel-router")');
+    expect(renderSrc).toContain("deParallelRouterTrialFired");
   });
 
   it("has in-range percentages and a parseable sunset date", () => {
@@ -369,5 +392,58 @@ describe("PostHog flag-shaped properties", () => {
 
   it("is empty when nothing is registered", () => {
     expect(canaryFeatureProperties([])).toEqual({});
+  });
+});
+
+// The attribution property. Without it, an install reporting both "true" and
+// "false" for a canary whose percentage never moved is indistinguishable from
+// a developer toggling HF_CANARY_*. The first calibration read hit exactly
+// that: 304 installs reported both values and the anomalous ones could not be
+// separated from deliberate overrides.
+describe("canary reason property", () => {
+  it("rides alongside the assignment, outside the $feature namespace", () => {
+    const props = canaryFeatureProperties([
+      { name: "de-parallel-router", enabled: true, reason: "in_cohort" },
+    ]);
+    expect(props["$feature/canary-de-parallel-router"]).toBe("true");
+    expect(props["canary_reason_de_parallel_router"]).toBe("in_cohort");
+  });
+
+  // A non-boolean under `$feature/` would corrupt the flag's own breakdowns,
+  // which is the whole reason the reason gets its own key.
+  it("never puts a reason inside the flag namespace", () => {
+    const props = canaryFeatureProperties([{ name: "x", enabled: false, reason: "forced_off" }]);
+    for (const [key, value] of Object.entries(props)) {
+      if (key.startsWith(CANARY_FEATURE_PREFIX)) {
+        expect(value).toMatch(/^(true|false)$/);
+      }
+    }
+  });
+
+  it("separates a forced override from a genuine cohort roll at the same value", () => {
+    const forced = canaryFeatureProperties([{ name: "f", enabled: true, reason: "forced_on" }]);
+    const rolled = canaryFeatureProperties([{ name: "f", enabled: true, reason: "in_cohort" }]);
+    // Identical assignment — only the reason tells them apart. This is the
+    // distinction the calibration read could not make.
+    expect(forced["$feature/canary-f"]).toBe(rolled["$feature/canary-f"]);
+    expect(forced["canary_reason_f"]).not.toBe(rolled["canary_reason_f"]);
+  });
+
+  it("emits `excluded` for CI, which replaces joining on is_ci", () => {
+    const props = canaryFeatureProperties([{ name: "c", enabled: false, reason: "excluded" }]);
+    // `excluded` and `out_of_cohort` are both enabled:false but mean different
+    // things — CI was never bucketed, the other lost the roll. Counting them
+    // together is what biased the first accuracy read low.
+    expect(props["canary_reason_c"]).toBe("excluded");
+  });
+
+  it("omits the reason key when no reason is supplied", () => {
+    const props = canaryFeatureProperties([{ name: "n", enabled: true }]);
+    expect(props["$feature/canary-n"]).toBe("true");
+    expect(props).not.toHaveProperty("canary_reason_n");
+  });
+
+  it("sanitizes the name into a property-safe key", () => {
+    expect(canaryReasonKey("de-parallel-router")).toBe("canary_reason_de_parallel_router");
   });
 });
