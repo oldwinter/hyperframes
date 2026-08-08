@@ -14,6 +14,7 @@ import {
   detectRenderModeHints,
   detectShaderTransitionUsage,
   detectThreeDTransformUsage,
+  discoverMediaFromBrowser,
   discoverAudioVolumeAutomationFromTimeline,
   inlineExternalScripts,
   localizeRemoteMediaSources,
@@ -22,6 +23,83 @@ import {
   recompileWithResolutions,
 } from "./htmlCompiler.js";
 import { validateNoSystemFonts } from "./render/planValidation.js";
+
+describe("discoverMediaFromBrowser", () => {
+  async function discover(html: string, currentSrcById: Record<string, string>) {
+    const { document } = parseHTML(html);
+    for (const [id, currentSrc] of Object.entries(currentSrcById)) {
+      const element = document.getElementById(id);
+      if (element) Object.defineProperty(element, "currentSrc", { value: currentSrc });
+    }
+    const previousDocument = Reflect.get(globalThis, "document");
+    Reflect.set(globalThis, "document", document);
+    try {
+      return await discoverMediaFromBrowser({ evaluate: async (collect) => collect() } as never);
+    } finally {
+      if (previousDocument === undefined) Reflect.deleteProperty(globalThis, "document");
+      else Reflect.set(globalThis, "document", previousDocument);
+    }
+  }
+
+  it("uses the selected currentSrc from a variable-bound nested source", async () => {
+    const media = await discover(
+      `<video id="clip" data-start="0" data-end="1">
+        <source src="fallback.mp4" data-var-src="clip_src" />
+      </video>`,
+      { clip: "https://cdn.example/runtime.webm" },
+    );
+
+    expect(media).toHaveLength(1);
+    expect(media[0]).toMatchObject({
+      id: "clip",
+      tagName: "video",
+      src: "https://cdn.example/runtime.webm",
+    });
+  });
+
+  it("discovers variable-bound images with the same generated id as the static parser", async () => {
+    const media = await discover(
+      `<img src="first.png" /><img src="fallback.png" data-var-src="hero_src" />`,
+      {},
+    );
+
+    expect(media).toHaveLength(1);
+    expect(media[0]).toMatchObject({ id: "hf-img-1", tagName: "image" });
+  });
+
+  it("discovers the owning image for a variable-bound picture source", async () => {
+    const media = await discover(
+      `<picture>
+        <source src="fallback.webp" data-var-src="hero_src" />
+        <img id="hero" src="fallback.png" />
+      </picture>`,
+      { hero: "https://cdn.example/runtime.avif" },
+    );
+
+    expect(media).toHaveLength(1);
+    expect(media[0]).toMatchObject({
+      id: "hero",
+      tagName: "image",
+      src: "https://cdn.example/runtime.avif",
+    });
+  });
+});
+
+function validTestMediaResponse(): Response {
+  const bytes = new Uint8Array([
+    0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0, 0, 0, 0, 0x69, 0x73, 0x6f, 0x6d,
+    0x6d, 0x70, 0x34, 0x32,
+  ]);
+  return new Response(bytes, { status: 200 });
+}
+
+function validTestImageResponse(): Response {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  return new Response(png, { status: 200 });
+}
 
 describe("injectSdkPositionEditsRenderScript", () => {
   it("injects before </body> when SDK position-edit markers are present", () => {
@@ -1362,7 +1440,7 @@ describe("localizeRemoteMediaSources", () => {
   it("rewrites remote <video> src to _remote_media path when download succeeds", async () => {
     const orig = globalThis.fetch;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).fetch = async () => new Response(new Uint8Array(100), { status: 200 });
+    (globalThis as any).fetch = async () => validTestMediaResponse();
     try {
       const dl = mkdtempSync(join(tmpdir(), "hf-dl-ok-"));
       const html = `<video id="v1" src="https://media-ok.example.com/a/clip.mp4" data-start="0" data-end="10" muted></video>`;
@@ -1385,13 +1463,42 @@ describe("localizeRemoteMediaSources", () => {
     expect(remoteMediaAssets.size).toBe(0);
   });
 
+  it("logs only a safe fingerprint and host for a signed-URL media failure", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalWarn = defaultLogger.warn;
+    const warnings: unknown[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () =>
+      new Response("<!doctype html><html><body>expired</body></html>", { status: 200 });
+    defaultLogger.warn = (message, meta) => warnings.push({ message, meta });
+    try {
+      const dl = mkdtempSync(join(tmpdir(), "hf-dl-safe-log-"));
+      const url = "https://cdn.example/private/customer.mp4?X-Amz-Signature=super-secret-signature";
+      const html = `<video id="v1" src="${url}" data-start="0" data-end="10"></video>`;
+      const { html: result, remoteMediaAssets } = await localizeRemoteMediaSources(html, dl);
+
+      expect(result).toContain(url);
+      expect(remoteMediaAssets.size).toBe(0);
+      expect(warnings).toHaveLength(1);
+      const serialized = JSON.stringify(warnings);
+      expect(serialized).toContain("cdn.example");
+      expect(serialized).toContain("urlFingerprint");
+      expect(serialized).not.toContain("customer.mp4");
+      expect(serialized).not.toContain("super-secret-signature");
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).fetch = originalFetch;
+      defaultLogger.warn = originalWarn;
+    }
+  });
+
   it("deduplicates: two tags with the same src URL → one download", async () => {
     const orig = globalThis.fetch;
     let fetchCount = 0;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (globalThis as any).fetch = async () => {
       fetchCount++;
-      return new Response(new Uint8Array(100), { status: 200 });
+      return validTestMediaResponse();
     };
     try {
       const dl = mkdtempSync(join(tmpdir(), "hf-dl-dedup-"));
@@ -1417,7 +1524,7 @@ describe("localizeRemoteMediaSources", () => {
   it("rewrites src in both double-quoted and single-quoted attributes", async () => {
     const orig = globalThis.fetch;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).fetch = async () => new Response(new Uint8Array(100), { status: 200 });
+    (globalThis as any).fetch = async () => validTestMediaResponse();
     try {
       const dl = mkdtempSync(join(tmpdir(), "hf-dl-quotes-"));
       const html = `<video id="v1" src="https://q.example.com/c/dq.mp4" data-start="0" data-end="10" muted></video>
@@ -1458,7 +1565,7 @@ describe("localizeRemoteImageSources", () => {
   it("rewrites remote <img> src to _remote_media path when download succeeds", async () => {
     const orig = globalThis.fetch;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).fetch = async () => new Response(new Uint8Array(100), { status: 200 });
+    (globalThis as any).fetch = async () => validTestImageResponse();
     try {
       const dl = mkdtempSync(join(tmpdir(), "hf-img-ok-"));
       const html = `<img class="hero" src="https://img-ok.example.com/photo.png" />`;
@@ -1487,7 +1594,7 @@ describe("localizeRemoteImageSources", () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (globalThis as any).fetch = async () => {
       fetchCount++;
-      return new Response(new Uint8Array(100), { status: 200 });
+      return validTestImageResponse();
     };
     try {
       const dl = mkdtempSync(join(tmpdir(), "hf-img-dedup-"));
@@ -1521,7 +1628,7 @@ describe("localizeRemoteImageSources", () => {
   it("rewrites both double-quoted and single-quoted src attributes", async () => {
     const orig = globalThis.fetch;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).fetch = async () => new Response(new Uint8Array(100), { status: 200 });
+    (globalThis as any).fetch = async () => validTestImageResponse();
     try {
       const dl = mkdtempSync(join(tmpdir(), "hf-img-quotes-"));
       const html = `<img src="https://q-img.example.com/dq.png" />
@@ -1545,7 +1652,7 @@ describe("localizeRemoteImageSources", () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (globalThis as any).fetch = async () => {
       fetchCount++;
-      return new Response(new Uint8Array(100), { status: 200 });
+      return validTestImageResponse();
     };
     try {
       const dl = mkdtempSync(join(tmpdir(), "hf-img-datasrc-"));
@@ -1566,7 +1673,7 @@ describe("localizeRemoteImageSources", () => {
     // <img> tags with `class` before `src`. Regex must not assume src position.
     const orig = globalThis.fetch;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).fetch = async () => new Response(new Uint8Array(100), { status: 200 });
+    (globalThis as any).fetch = async () => validTestImageResponse();
     try {
       const dl = mkdtempSync(join(tmpdir(), "hf-img-attr-order-"));
       const html = `<img class="kobe-cutout" alt="kobe" src="https://astral.example.com/d828bca.png" />`;
@@ -1736,6 +1843,7 @@ h1 { font-size: 2rem; }`;
       const { html: result, remoteMediaAssets } = await localizeRemoteFontFaces(html, dl);
       // The <link> tag should be replaced with an inline <style> containing the @font-face
       expect(result).not.toContain(`href="${STYLESHEET_URL}"`);
+      expect(result).not.toContain(STYLESHEET_URL);
       expect(result).not.toContain("<link");
       expect(result).toContain("@font-face");
       expect(result).toContain("CustomFont");
@@ -1763,6 +1871,57 @@ h1 { font-size: 2rem; }`;
       expect(remoteMediaAssets.size).toBe(0);
     } finally {
       globalThis.fetch = orig;
+    }
+  });
+
+  it("rejects a stylesheet redirect to a private host before the second request", async () => {
+    const STYLESHEET_URL = "https://styles.example.com/fonts.css";
+    const orig = globalThis.fetch;
+    let fetchCount = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () => {
+      fetchCount++;
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://169.254.169.254/latest/meta-data/" },
+      });
+    };
+    try {
+      const dl = mkdtempSync(join(tmpdir(), "hf-ff-private-redirect-"));
+      const html = `<link rel="stylesheet" href="${STYLESHEET_URL}">`;
+      const { html: result, remoteMediaAssets } = await localizeRemoteFontFaces(html, dl);
+
+      expect(fetchCount).toBe(1);
+      expect(result).toBe(html);
+      expect(remoteMediaAssets.size).toBe(0);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it("does not log a signed stylesheet path or query on failure", async () => {
+    const STYLESHEET_URL =
+      "https://styles.example.com/private/customer.css?X-Amz-Signature=super-secret";
+    const originalFetch = globalThis.fetch;
+    const originalWarn = defaultLogger.warn;
+    const warnings: unknown[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).fetch = async () =>
+      new Response(null, { status: 503, statusText: STYLESHEET_URL });
+    defaultLogger.warn = (message, meta) => warnings.push({ message, meta });
+    try {
+      const dl = mkdtempSync(join(tmpdir(), "hf-ff-safe-style-log-"));
+      const html = `<link rel="stylesheet" href="${STYLESHEET_URL}">`;
+      await localizeRemoteFontFaces(html, dl);
+
+      const serialized = JSON.stringify(warnings);
+      expect(serialized).toContain("styles.example.com");
+      expect(serialized).toContain("urlFingerprint");
+      expect(serialized).not.toContain("customer.css");
+      expect(serialized).not.toContain("super-secret");
+    } finally {
+      globalThis.fetch = originalFetch;
+      defaultLogger.warn = originalWarn;
     }
   });
 

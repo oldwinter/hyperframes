@@ -6,7 +6,7 @@
 
 - 上游项目：`heygen-com/hyperframes`
 - 中文 fork：`oldwinter/hyperframes`
-- 当前同步上游 commit：`74fadf69c464c0e0658bd7a6b740986fc3aceba8`（v0.7.88）
+- 当前同步上游 commit：`fc0298de4`（v0.7.95）
 - 上游许可：Apache-2.0
 - 主要安装面：skills CLI、Claude/Codex plugin、HyperFrames CLI
 - 中文 runtime 入口：`skills/` 下的 19 个 runtime skill
@@ -15,8 +15,10 @@
 
 HyperFrames 的 HTML、timing、seek-safe、render、媒体和 CLI 契约必须保持精确。每个 `skills/*/SKILL.md` 在英文正文前提供中文执行导读；代码、命令、参数、JSON/YAML key、CSS/HTML 标记、路径、注册表名称和验证阈值不翻译。上游英文正文、references 与产品文档继续作为权威技术契约。
 
-本批中文化补充了 v0.7.88 的 Color Grading guide、Prompt Guide 章节、release note
-和 changelog 摘要，重点覆盖固定处理顺序、grade 动画、局部分层限制和源素材检查。
+本批同步 v0.7.88 → v0.7.95（234 个上游 commit）：上游重写了 Color Grading
+guide 并在 Prompt Guide 中改用 `DocsVideo` 组件与新的 reference/catalog 链接，
+因此两个文档的中文执行导读已随新正文更新；changelog 为 v0.7.89–v0.7.95 各版本
+补充中文摘要。19 个 runtime skill 的 SKILL.md 上游正文未变，其中文导读保持有效。
 
 ## 安装与交付
 

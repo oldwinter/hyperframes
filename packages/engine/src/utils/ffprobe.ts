@@ -1,9 +1,9 @@
 // fallow-ignore-file code-duplication complexity
 import { spawn } from "child_process";
-import { readFileSync } from "fs";
+import { createReadStream, readFileSync, statSync } from "fs";
 import * as zlib from "node:zlib";
 import { StringDecoder } from "node:string_decoder";
-import { basename, extname } from "path";
+import { basename } from "path";
 import { redactTelemetryString } from "@hyperframes/core";
 import { FFPROBE_PATH_ENV, getFfprobeBinary } from "./ffmpegBinaries.js";
 import { ManagedChildProcess } from "./managedChildProcess.js";
@@ -52,6 +52,7 @@ async function runFfprobe(
   filePath: string,
   argsWithoutInput: string[],
   signal?: AbortSignal,
+  stdoutOptions?: { retainTail?: boolean; maxChars?: number },
 ): Promise<string> {
   // `--` stops option parsing so a path like "-intro.mp4" is a filename, but
   // it does NOT cover a path of exactly "-": ffprobe rewrites that to `fd:`
@@ -79,6 +80,7 @@ async function runFfprobe(
   const decoder = new StringDecoder("utf8");
   let stdout = "";
   let stdoutTruncated = false;
+  const stdoutMaxChars = stdoutOptions?.maxChars ?? FFPROBE_STDOUT_MAX_CHARS;
   proc.stdout.on("data", (data: Buffer) => {
     // stderr is capped by ManagedChildProcess; stdout had no bound at all, and
     // analyzeKeyframeIntervals emits one line per frame — an all-intra ProRes
@@ -87,9 +89,13 @@ async function runFfprobe(
     stdout += decoder.write(data);
     // Checked AFTER appending: a single chunk can already exceed the bound,
     // so a pre-append check only ever stops the second one.
-    if (stdout.length > FFPROBE_STDOUT_MAX_CHARS) {
-      stdoutTruncated = true;
-      stdout = "";
+    if (stdout.length > stdoutMaxChars) {
+      if (stdoutOptions?.retainTail) {
+        stdout = stdout.slice(-stdoutMaxChars);
+      } else {
+        stdoutTruncated = true;
+        stdout = "";
+      }
     }
   });
   const managed = new ManagedChildProcess(proc, {
@@ -101,7 +107,7 @@ async function runFfprobe(
   stdout += decoder.end();
   if (stdoutTruncated) {
     throw new Error(
-      `[FFmpeg] ffprobe output exceeded ${FFPROBE_STDOUT_MAX_CHARS} characters; refusing to parse a truncated result.`,
+      `[FFmpeg] ffprobe output exceeded ${stdoutMaxChars} characters; refusing to parse a truncated result.`,
     );
   }
   if (outcome.reason === "spawn_error") {
@@ -135,7 +141,20 @@ function parseProbeJson(stdout: string): FFProbeOutput {
 }
 
 const videoMetadataCache = new Map<string, Promise<VideoMetadata>>();
+const finalVideoFrameTimestampCache = new Map<string, Promise<number>>();
+const finalVideoFrameTimestampSignalCaches = new WeakMap<
+  AbortSignal,
+  Map<string, Promise<number>>
+>();
 const audioMetadataCache = new Map<string, Promise<AudioMetadata>>();
+interface MediaProbeCacheEntry {
+  identity: string;
+  promise: Promise<FFProbeOutput>;
+}
+
+const mediaProbeOutputCache = new Map<string, MediaProbeCacheEntry>();
+const mediaProbeOutputSignalCaches = new WeakMap<AbortSignal, Map<string, MediaProbeCacheEntry>>();
+const MEDIA_PROBE_OUTPUT_CACHE_MAX_ENTRIES = 128;
 // FFmpeg's built-in AAC encoder emits AAC-LC, which has 1024 samples per packet.
 const AAC_LC_SAMPLES_PER_PACKET = 1024;
 
@@ -151,6 +170,11 @@ export interface VideoColorSpace {
 export interface VideoMetadata {
   durationSeconds: number;
   videoStreamDurationSeconds: number;
+  /** Absolute presentation timestamp at which the selected video stream
+   * starts. FFmpeg input seeks are relative to this point, while ffprobe frame
+   * timestamps are absolute, so callers crossing those APIs must normalize by
+   * this value. Absent only in legacy/manually-constructed metadata. */
+  videoStreamStartSeconds?: number;
   width: number;
   height: number;
   fps: number;
@@ -185,6 +209,7 @@ interface FFProbeStream {
   width?: number;
   height?: number;
   duration?: string;
+  start_time?: string;
   nb_frames?: string;
   nb_read_packets?: string;
   pix_fmt?: string;
@@ -196,11 +221,13 @@ interface FFProbeStream {
   color_primaries?: string;
   color_space?: string;
   tags?: Record<string, string>;
+  disposition?: { attached_pic?: number };
 }
 
 interface FFProbeFormat {
   duration?: string;
   bit_rate?: string;
+  format_name?: string;
 }
 
 interface FFProbeOutput {
@@ -212,6 +239,226 @@ interface StillImageMetadata {
   width: number;
   height: number;
   colorSpace: VideoColorSpace | null;
+}
+
+export interface MediaProbeProfile {
+  hasVideoStream: boolean;
+  hasAudioStream: boolean;
+  visualKind: "none" | "still" | "moving";
+}
+
+const STILL_IMAGE_DEMUXERS = new Set([
+  "apng",
+  "bmp_pipe",
+  "dds_pipe",
+  "dpx_pipe",
+  "exr_pipe",
+  "gif",
+  "ico",
+  "image2",
+  "image2pipe",
+  "jpeg_pipe",
+  "jxl_pipe",
+  "png_pipe",
+  "qdraw_pipe",
+  "sgi_pipe",
+  "svg_pipe",
+  "tiff_pipe",
+  "webp_pipe",
+]);
+
+async function hasAvifFileBrand(filePath: string): Promise<boolean> {
+  try {
+    const chunks: Buffer[] = [];
+    for await (const chunk of createReadStream(filePath, { start: 0, end: 4095 })) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const bytes = Buffer.concat(chunks);
+    if (bytes.length < 16 || bytes.toString("ascii", 4, 8) !== "ftyp") return false;
+    const boxSize = bytes.readUInt32BE(0);
+    if (boxSize < 16 || boxSize > bytes.length) return false;
+    const avifBrands = new Set(["avif", "avis"]);
+    if (avifBrands.has(bytes.toString("ascii", 8, 12))) return true;
+    for (let offset = 16; offset + 4 <= boxSize; offset += 4) {
+      if (avifBrands.has(bytes.toString("ascii", offset, offset + 4))) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function isStillImageVisual(output: FFProbeOutput, filePath: string): Promise<boolean> {
+  const formatNames = (output.format.format_name ?? "")
+    .split(",")
+    .map((name) => name.trim().toLowerCase())
+    .filter(Boolean);
+  return (
+    formatNames.some((name) => STILL_IMAGE_DEMUXERS.has(name)) || (await hasAvifFileBrand(filePath))
+  );
+}
+
+function isPngImageProbe(output: FFProbeOutput): boolean {
+  const formatNames = (output.format.format_name ?? "")
+    .split(",")
+    .map((name) => name.trim().toLowerCase());
+  return (
+    formatNames.includes("png_pipe") ||
+    output.streams.some(
+      (stream) => stream.codec_type === "video" && stream.codec_name?.toLowerCase() === "png",
+    )
+  );
+}
+
+function mediaFileIdentity(filePath: string): string | null {
+  try {
+    const stat = statSync(filePath, { bigint: true });
+    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+  } catch {
+    return null;
+  }
+}
+
+async function probeMediaOutput(filePath: string, signal?: AbortSignal): Promise<FFProbeOutput> {
+  let cache = mediaProbeOutputCache;
+  if (signal) {
+    cache = mediaProbeOutputSignalCaches.get(signal) ?? new Map<string, MediaProbeCacheEntry>();
+    mediaProbeOutputSignalCaches.set(signal, cache);
+  }
+
+  const identity = mediaFileIdentity(filePath);
+  const cached = cache.get(filePath);
+  if (identity !== null && cached?.identity === identity) {
+    // The no-signal fallback is process-scoped, so touch its entries to make
+    // the fixed-size map an LRU. Signal-owned maps are released with their
+    // render and do not need process-lifetime eviction.
+    if (!signal) {
+      cache.delete(filePath);
+      cache.set(filePath, cached);
+    }
+    return cached.promise;
+  }
+  const promise = runFfprobe(
+    filePath,
+    ["-print_format", "json", "-show_format", "-show_streams"],
+    signal,
+  ).then(parseProbeJson);
+  if (identity !== null) {
+    cache.set(filePath, { identity, promise });
+    if (!signal && cache.size > MEDIA_PROBE_OUTPUT_CACHE_MAX_ENTRIES) {
+      const oldestPath = cache.keys().next().value;
+      if (oldestPath !== undefined) cache.delete(oldestPath);
+    }
+  }
+  promise.catch(() => {
+    if (cache.get(filePath)?.promise === promise) {
+      cache.delete(filePath);
+    }
+  });
+  return promise;
+}
+
+class StructurallyIncompletePngError extends Error {}
+
+async function readFileRange(
+  filePath: string,
+  start: number,
+  length: number,
+  signal?: AbortSignal,
+): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of createReadStream(filePath, {
+    start,
+    end: start + length - 1,
+    highWaterMark: length,
+    signal,
+  })) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function hasCompletePngStructure(filePath: string, signal?: AbortSignal): Promise<boolean> {
+  try {
+    signal?.throwIfAborted();
+    const fileSize = statSync(filePath).size;
+    // Range streams are read-only and skip large IDAT payloads without loading
+    // the entire image into memory.
+    const signature = await readFileRange(filePath, 0, 8, signal);
+    signal?.throwIfAborted();
+    if (
+      signature.length !== 8 ||
+      !signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    ) {
+      return false;
+    }
+
+    let seenHeader = false;
+    let seenImageData = false;
+    let offset = 8;
+    while (offset + 12 <= fileSize) {
+      signal?.throwIfAborted();
+      const chunkHeader = await readFileRange(filePath, offset, 8, signal);
+      signal?.throwIfAborted();
+      if (chunkHeader.length !== 8) return false;
+      const chunkLength = chunkHeader.readUInt32BE(0);
+      const chunkEnd = offset + 12 + chunkLength;
+      if (chunkEnd > fileSize) return false;
+      const chunkType = chunkHeader.toString("ascii", 4, 8);
+      if (chunkType === "IHDR") seenHeader = chunkLength === 13 && offset === 8;
+      if (chunkType === "IDAT") seenImageData = true;
+      if (chunkType === "IEND") return seenHeader && seenImageData && chunkLength === 0;
+      offset = chunkEnd;
+    }
+    return false;
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
+    return false;
+  }
+}
+
+/**
+ * Probe stream capabilities without assuming the caller's element type.
+ * File extensions and HTTP MIME are deliberately ignored: extensionless
+ * assets and valid media served through generic CDN content types must work.
+ */
+export async function probeMediaProfile(
+  filePath: string,
+  options?: { signal?: AbortSignal },
+): Promise<MediaProbeProfile> {
+  try {
+    const output = await probeMediaOutput(filePath, options?.signal);
+    options?.signal?.throwIfAborted();
+    const videoStreams = output.streams.filter((stream) => stream.codec_type === "video");
+    const hasMovingVideoStream = videoStreams.some(
+      (stream) => stream.disposition?.attached_pic !== 1,
+    );
+    const isStillImage = videoStreams.length > 0 && (await isStillImageVisual(output, filePath));
+    options?.signal?.throwIfAborted();
+    if (
+      isStillImage &&
+      isPngImageProbe(output) &&
+      !(await hasCompletePngStructure(filePath, options?.signal))
+    ) {
+      throw new StructurallyIncompletePngError("[FFmpeg] PNG input is structurally incomplete");
+    }
+    return {
+      hasVideoStream: videoStreams.length > 0,
+      hasAudioStream: output.streams.some((stream) => stream.codec_type === "audio"),
+      visualKind: isStillImage ? "still" : hasMovingVideoStream ? "moving" : "none",
+    };
+  } catch (error) {
+    if (options?.signal?.aborted) throw options.signal.reason ?? error;
+    if (error instanceof StructurallyIncompletePngError) throw error;
+    // Preserve the PNG parser fallback used by extractMediaMetadata when the
+    // packaged ffprobe binary is unavailable. Signature parsing (not the file
+    // extension) keeps extensionless PNGs eligible for preflight.
+    const stillImage = extractStillImageMetadata(filePath);
+    if (stillImage && (await hasCompletePngStructure(filePath, options?.signal))) {
+      return { hasVideoStream: true, hasAudioStream: false, visualKind: "still" };
+    }
+    throw error;
+  }
 }
 
 // node:zlib's crc32 is native and takes a running seed, so the chunk type and
@@ -348,8 +595,6 @@ export function pixelFormatHasAlpha(pixelFormat: string): boolean {
 }
 
 function extractStillImageMetadata(filePath: string): StillImageMetadata | null {
-  if (extname(filePath).toLowerCase() !== ".png") return null;
-
   try {
     return extractPngMetadataFromBuffer(readFileSync(filePath));
   } catch {
@@ -460,13 +705,7 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
 
     let output: FFProbeOutput | null = null;
     try {
-      const stdout = await runFfprobe(filePath, [
-        "-print_format",
-        "json",
-        "-show_format",
-        "-show_streams",
-      ]);
-      output = parseProbeJson(stdout);
+      output = await probeMediaOutput(filePath);
     } catch (error) {
       if (!stillImage()) throw error;
     }
@@ -478,6 +717,7 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
         return {
           durationSeconds: 0,
           videoStreamDurationSeconds: 0,
+          videoStreamStartSeconds: 0,
           width: stillImageMeta.width,
           height: stillImageMeta.height,
           fps: 0,
@@ -528,10 +768,13 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
 
     const containerDuration = output?.format.duration ? parseFloat(output.format.duration) : 0;
     const streamDuration = videoStream.duration ? parseFloat(videoStream.duration) : 0;
+    const parsedStreamStart = videoStream.start_time ? parseFloat(videoStream.start_time) : 0;
+    const streamStart = Number.isFinite(parsedStreamStart) ? parsedStreamStart : 0;
 
     return {
       durationSeconds: containerDuration,
       videoStreamDurationSeconds: streamDuration > 0 ? streamDuration : containerDuration,
+      videoStreamStartSeconds: streamStart,
       width: videoStream.width || stillImage()?.width || 0,
       height: videoStream.height || stillImage()?.height || 0,
       fps,
@@ -547,6 +790,93 @@ export async function extractMediaMetadata(filePath: string): Promise<VideoMetad
   probePromise.catch(() => {
     if (videoMetadataCache.get(filePath) === probePromise) {
       videoMetadataCache.delete(filePath);
+    }
+  });
+  return probePromise;
+}
+
+/**
+ * Return the FFmpeg input-seek position of the final decoded video frame.
+ *
+ * A fixed seek window near EOF is not sufficient: sub-1fps and sparse VFR
+ * sources can have no frame timestamp inside that window even though the last
+ * decoded frame remains displayed through the stream duration. ffprobe seeks
+ * to the preceding keyframe and walks forward; retaining only its stdout tail
+ * keeps memory bounded even for a pathological long GOP. ffprobe reports
+ * absolute presentation timestamps, but FFmpeg input `-ss` is relative to the
+ * stream start; the result is normalized into that relative seek domain. Some
+ * unindexed transports cannot decode after an interval seek, so an empty tail
+ * probe falls back to a bounded-output full scan rather than rejecting valid
+ * media. The scan may cost decode time, but retains only 64 KiB of timestamps.
+ */
+export async function extractFinalVideoFrameTimestamp(
+  filePath: string,
+  metadata: Pick<VideoMetadata, "videoStreamDurationSeconds" | "videoStreamStartSeconds">,
+  signal?: AbortSignal,
+): Promise<number> {
+  const videoDurationSeconds = metadata.videoStreamDurationSeconds;
+  const candidateStreamStart = metadata.videoStreamStartSeconds ?? 0;
+  const videoStreamStartSeconds = Number.isFinite(candidateStreamStart) ? candidateStreamStart : 0;
+  const cacheKey = `${filePath}\0${String(videoStreamStartSeconds)}\0${String(videoDurationSeconds)}`;
+  // A caller-owned abort signal cannot safely own a globally shared process
+  // promise: aborting one render would fail unrelated consumers. Calls in the
+  // SAME cancellation scope should still share the expensive interval +
+  // fallback chain, though — duplicate held-tail elements in one render carry
+  // the same signal and otherwise fan out N full-file scans before extraction
+  // dedupe. Weakly key the cache by cancellation owner to preserve both
+  // aggregate work bounds and cross-render isolation.
+  let probeCache = finalVideoFrameTimestampCache;
+  if (signal) {
+    probeCache = finalVideoFrameTimestampSignalCaches.get(signal) ?? new Map();
+    finalVideoFrameTimestampSignalCaches.set(signal, probeCache);
+  }
+  const cached = probeCache.get(cacheKey);
+  if (cached) return cached;
+
+  const probePromise = (async () => {
+    if (!(videoDurationSeconds > 0) || !Number.isFinite(videoDurationSeconds)) {
+      throw new Error(
+        `[FFmpeg] Cannot locate final video frame for invalid duration ${String(videoDurationSeconds)}`,
+      );
+    }
+    const streamEnd = videoStreamStartSeconds + videoDurationSeconds;
+    const intervalStart = Math.max(videoStreamStartSeconds, streamEnd - 1);
+    const parseFinalTimestamp = (stdout: string): number | undefined =>
+      stdout
+        .split("\n")
+        .map((line) => line.trim().split(",")[0]?.trim() ?? "")
+        .filter((value) => value.length > 0)
+        .map((value) => Number(value))
+        .filter((timestamp) => Number.isFinite(timestamp))
+        .at(-1);
+    const probe = async (readInterval?: string): Promise<number | undefined> => {
+      const args = [
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "frame=best_effort_timestamp_time",
+        "-of",
+        "csv=p=0",
+      ];
+      if (readInterval) args.splice(2, 0, "-read_intervals", readInterval);
+      const stdout = await runFfprobe(filePath, args, signal, {
+        retainTail: true,
+        maxChars: 64 * 1024,
+      });
+      return parseFinalTimestamp(stdout);
+    };
+    const timestamp =
+      (await probe(`${intervalStart}%${streamEnd}`)) ?? (await probe(/* full scan */));
+    if (timestamp === undefined) {
+      throw new Error("[FFmpeg] ffprobe found no decodable final video frame");
+    }
+    return Math.min(Math.max(timestamp - videoStreamStartSeconds, 0), videoDurationSeconds);
+  })();
+
+  probeCache.set(cacheKey, probePromise);
+  probePromise.catch(() => {
+    if (probeCache.get(cacheKey) === probePromise) {
+      probeCache.delete(cacheKey);
     }
   });
   return probePromise;
@@ -571,12 +901,7 @@ export async function extractAudioMetadata(
   if (cached) return cached;
 
   const probePromise = (async (): Promise<AudioMetadata> => {
-    const stdout = await runFfprobe(
-      filePath,
-      ["-print_format", "json", "-show_format", "-show_streams"],
-      options?.signal,
-    );
-    const output = parseProbeJson(stdout);
+    const output = await probeMediaOutput(filePath, options?.signal);
     const audioStream = output.streams.find((s) => s.codec_type === "audio");
     if (!audioStream) throw new Error("[FFmpeg] No audio stream found");
 

@@ -20,30 +20,23 @@ interface UseTimelineRowVirtualizationInput {
   viewport: TimelineScrollViewportSnapshot;
   rowGeometry: TimelineRowGeometry;
   sessionEpoch: number;
-  elements: TimelineElement[];
+  elements: readonly TimelineElement[];
   selectedElementId: string | null;
-  revealElementId: string | null;
+  focusedRowKey?: number;
   draggedRowKey?: number;
-  resizingRowKey?: number;
+  resizingElementIds?: readonly string[];
   clipContextMenuRowKey?: number;
   keyframeContextMenuRowKey?: number;
   lastScrollLeftRef: RefObject<number>;
   syncScrollViewport: (element: HTMLDivElement, isScrolling?: boolean) => void;
 }
 
-interface TimelineDomFocusPin {
-  readonly rowKey?: number;
-  readonly elementId?: string;
-}
-
-function getTimelineDomFocusPin(target: EventTarget | null): TimelineDomFocusPin | undefined {
+function getFocusedTimelineRowKey(target: EventTarget | null): number | undefined {
   if (!(target instanceof Element)) return undefined;
   const value = target.closest<HTMLElement>("[data-timeline-row-key]")?.dataset.timelineRowKey;
-  const parsedRowKey = value === undefined ? undefined : Number(value);
-  const rowKey =
-    parsedRowKey !== undefined && Number.isFinite(parsedRowKey) ? parsedRowKey : undefined;
-  const elementId = target.closest<HTMLElement>("[data-el-id]")?.dataset.elId;
-  return rowKey === undefined && elementId === undefined ? undefined : { rowKey, elementId };
+  if (value === undefined) return undefined;
+  const rowKey = Number(value);
+  return Number.isFinite(rowKey) ? rowKey : undefined;
 }
 
 export function useTimelineRowVirtualization({
@@ -53,45 +46,50 @@ export function useTimelineRowVirtualization({
   sessionEpoch,
   elements,
   selectedElementId,
-  revealElementId,
+  focusedRowKey,
   draggedRowKey,
-  resizingRowKey,
+  resizingElementIds,
   clipContextMenuRowKey,
   keyframeContextMenuRowKey,
   lastScrollLeftRef,
   syncScrollViewport,
 }: UseTimelineRowVirtualizationInput) {
   const enabled = STUDIO_TIMELINE_ROW_VIRTUALIZATION_ENABLED;
-  const [domFocusPin, setDomFocusPin] = useState<TimelineDomFocusPin>();
+  const [domFocusedRowKey, setDomFocusedRowKey] = useState<number>();
   const onTimelineFocus = useCallback((event: ReactFocusEvent<HTMLDivElement>) => {
-    setDomFocusPin(getTimelineDomFocusPin(event.target));
+    setDomFocusedRowKey(getFocusedTimelineRowKey(event.target));
   }, []);
   const onTimelineBlur = useCallback((event: ReactFocusEvent<HTMLDivElement>) => {
-    setDomFocusPin(getTimelineDomFocusPin(event.relatedTarget));
+    setDomFocusedRowKey(getFocusedTimelineRowKey(event.relatedTarget));
   }, []);
-  const focusIdentity = useMemo(
+  const selectedIdentity = useMemo(
     () => resolveTimelineFocusIdentity(elements, selectedElementId),
     [elements, selectedElementId],
   );
-  const revealIdentity = useMemo(
-    () => resolveTimelineFocusIdentity(elements, revealElementId),
-    [elements, revealElementId],
+  const resizingRowKeys = useMemo(
+    () =>
+      resizingElementIds
+        ?.map((elementId) => resolveTimelineFocusIdentity(elements, elementId)?.rowKey)
+        .filter((rowKey): rowKey is number => rowKey !== undefined) ?? [],
+    [elements, resizingElementIds],
   );
   const pinnedRowKeys = useMemo(
     () =>
       [
         draggedRowKey,
-        resizingRowKey,
-        revealIdentity?.rowKey,
+        ...resizingRowKeys,
+        selectedIdentity?.rowKey,
+        focusedRowKey,
         clipContextMenuRowKey,
         keyframeContextMenuRowKey,
       ].filter((rowKey): rowKey is number => rowKey !== undefined),
     [
       clipContextMenuRowKey,
       draggedRowKey,
+      focusedRowKey,
       keyframeContextMenuRowKey,
-      resizingRowKey,
-      revealIdentity,
+      resizingRowKeys,
+      selectedIdentity,
     ],
   );
   const virtualRows = useTimelineVirtualRows({
@@ -101,7 +99,7 @@ export function useTimelineRowVirtualization({
     rowGeometry,
     sessionEpoch,
     pinnedRowKeys,
-    focusedRowKey: domFocusPin?.rowKey ?? focusIdentity?.rowKey,
+    focusedRowKey: domFocusedRowKey ?? focusedRowKey,
   });
 
   const previousLayoutRef = useRef(rowGeometry);
@@ -134,7 +132,6 @@ export function useTimelineRowVirtualization({
   return {
     enabled,
     virtualRows,
-    focusedElementId: domFocusPin?.elementId,
     timelineFocusProps: { onFocus: onTimelineFocus, onBlur: onTimelineBlur },
   };
 }

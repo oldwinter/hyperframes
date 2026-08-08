@@ -16,7 +16,12 @@ import {
   loadRuntimeSourceSignature,
 } from "./runtimeSource.js";
 import { VERSION as version } from "../version.js";
-import { buildStudioHeadScripts, resolveCliTelemetryDistinctId } from "./telemetryIdentity.js";
+import {
+  buildStudioHeadScriptsForHost,
+  identityAllowed,
+  refreshTelemetryPosture,
+  resolveCliTelemetryDistinctId,
+} from "./telemetryIdentity.js";
 import { emitStudioRenderComplete, emitStudioRenderError } from "./studioRenderTelemetry.js";
 import { isDevMode } from "../utils/env.js";
 import {
@@ -27,6 +32,7 @@ import {
   consumeFileWriteReceipt,
   getMimeType,
   type PreviewApiAdapter,
+  thumbnailDeviceScaleFactor,
   type ResolvedProject,
   type RenderJobState,
   type BackgroundRemovalRender,
@@ -394,7 +400,8 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         await import("../../../producer/src/services/deterministicFonts.js");
       const { prepareAnimatedGifInputs } =
         await import("../../../producer/src/services/animatedGifPrep.js");
-      const { downloadToTemp } = await import("../../../producer/src/utils/urlDownloader.js");
+      const { downloadToTemp, writeUrlDownloadTelemetry } =
+        await import("../../../producer/src/utils/urlDownloader.js");
       const gifOutputDir = join(project.dir, ".hyperframes", "prepared-assets", "gif");
       const gifDownloadDir = join(project.dir, ".hyperframes", "prepared-assets", "downloads");
       const prepared = await prepareAnimatedGifInputs(html, {
@@ -403,7 +410,11 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         outputDir: gifOutputDir,
         outputSrcPrefix: ".hyperframes/prepared-assets/gif",
         cacheDir: gifOutputDir,
-        sourceAssets: await downloadRemoteGifImageSources(html, gifDownloadDir, downloadToTemp),
+        sourceAssets: await downloadRemoteGifImageSources(html, gifDownloadDir, (url, destDir) =>
+          downloadToTemp(url, destDir, undefined, undefined, undefined, {
+            onTelemetry: writeUrlDownloadTelemetry,
+          }),
+        ),
       });
       return injectDeterministicFontFaces(prepared.html);
     },
@@ -424,6 +435,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     rendersDir: () => join(projectDir, "renders"),
 
     startRender(opts): RenderJobState {
+      // The render POST is a request boundary like any other. Without this an
+      // already-open Studio tab keeps rendering under the posture cached when
+      // the server booted.
+      refreshTelemetryPosture();
       const abortController = new AbortController();
       const state: RenderJobState = {
         id: opts.jobId,
@@ -503,6 +518,12 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
             metaPath,
             JSON.stringify({ status: "complete", durationMs: Date.now() - startTime }),
           );
+          // Refreshed HERE, not just at render start: a render can run for
+          // minutes, and `hyperframes telemetry disable` during one must be
+          // honoured by the event that reports it. Studio never polls
+          // /api/telemetry-identity, so this process would otherwise keep its
+          // startup-cached posture for the life of the preview server.
+          refreshTelemetryPosture();
           emitStudioRenderComplete(opts, Date.now() - startTime, job.perfSummary);
         } catch (err) {
           if (abortController.signal.aborted) {
@@ -512,6 +533,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
           state.status = "failed";
           state.error = err instanceof Error ? err.message : String(err);
           // fallow-ignore-next-line code-duplication
+          refreshTelemetryPosture();
           emitStudioRenderError(opts, Date.now() - startTime, state.stage, err, renderJob);
           try {
             const metaPath = opts.outputPath.replace(/\.(mp4|webm|mov)$/, ".meta.json");
@@ -550,9 +572,18 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         );
       }
       let page: import("puppeteer-core").Page | null = null;
+      const closePage = () => void page?.close().catch(() => {});
+      opts.signal.addEventListener("abort", closePage, { once: true });
       try {
         page = await session.browser.newPage();
-        await page.setViewport({ width: opts.width || 1920, height: opts.height || 1080 });
+        if (opts.signal.aborted) return null;
+        const width = opts.width || 1920;
+        const height = opts.height || 1080;
+        await page.setViewport({
+          width,
+          height,
+          deviceScaleFactor: thumbnailDeviceScaleFactor(opts),
+        });
         await page.goto(opts.previewUrl, { waitUntil: "domcontentloaded", timeout: 10000 });
         await page
           .waitForFunction(
@@ -600,12 +631,15 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         )) as Buffer;
         return screenshot;
       } catch (err) {
-        console.warn(
-          "[Studio] Thumbnail generation failed:",
-          err instanceof Error ? err.message : err,
-        );
+        if (!opts.signal.aborted) {
+          console.warn(
+            "[Studio] Thumbnail generation failed:",
+            err instanceof Error ? err.message : err,
+          );
+        }
         return null;
       } finally {
+        opts.signal.removeEventListener("abort", closePage);
         await page?.close().catch(() => {});
       }
     },
@@ -692,7 +726,26 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   // clients that can't rely on the injected global. Returns the CLI's anonymous
   // distinct id (no PII) so the browser session can join the CLI's PostHog
   // person, or `{ distinctId: null }` when CLI telemetry is disabled.
+  //
+  // Deliberately does NOT serve `bucketSeed`. Studio gets its canary answers
+  // from the injected `window.__HF_CLI_CANARY_DECISIONS` (booleans, not the
+  // value cohorts derive from), so nothing needs the seed over HTTP — and an
+  // unauthenticated local endpoint is a strictly worse place for it than an
+  // inline script scoped to Studio's own document.
+  //
+  // Host-guarded against DNS rebinding: a remote page can point a hostname it
+  // controls at 127.0.0.1 and read this response as same-origin. Pinning the
+  // Host header to a loopback name means such a request (which carries the
+  // attacker's hostname) is refused. Same-origin Studio traffic always
+  // presents the bound loopback host.
   app.get("/api/telemetry-identity", (c) => {
+    if (!identityAllowed(c.req.header("host"))) {
+      return c.json({ error: "forbidden" }, 403);
+    }
+    // Same request-boundary refresh the head-script route does: this endpoint
+    // is polled by a long-lived Studio tab, so a cached posture here outlives
+    // an opt-out run in another terminal just as visibly.
+    refreshTelemetryPosture();
     return c.json({ distinctId: resolveCliTelemetryDistinctId() });
   });
 
@@ -836,7 +889,17 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     // Inject before the studio bundle runs. Identity script first (see
     // buildStudioHeadScripts) so the CLI distinct id is on `window` by the time
     // telemetry init reads it.
-    const headScript = buildStudioHeadScripts(buildRuntimeEnvScript());
+    //
+    // Host-guarded for the same reason /api/telemetry-identity is, and it has
+    // to be checked HERE too: guarding only the endpoint leaves this route as
+    // an open side door, since a rebound origin can simply fetch `/` and read
+    // the same distinct id and seed out of the returned HTML.
+    //
+    // Only IDENTITY is withheld from an untrusted Host. The canary decisions
+    // map still goes out — it is non-identifying, and a LAN/remote Studio
+    // (`HYPERFRAMES_PREVIEW_HOST=0.0.0.0`) needs it to stay in agreement with
+    // the CLI. See buildStudioHeadScriptsForHost.
+    const headScript = buildStudioHeadScriptsForHost(buildRuntimeEnvScript(), c.req.header("host"));
     if (headScript) {
       html = html.replace("<head>", `<head>${headScript}`);
     }

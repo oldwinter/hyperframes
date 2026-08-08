@@ -53,6 +53,82 @@ describe("usePlayerStore", () => {
     });
   });
 
+  describe("focused ease requests", () => {
+    it("stamps the current project session and only lets its nonce clear it", () => {
+      const store = usePlayerStore.getState();
+      store.beginTimelineSession("project-a");
+      store.setSelectedElementId("index.html#hero");
+      store.setFocusedEaseSegment({
+        elementId: "index.html#hero",
+        animationId: "animation-a",
+        tweenPercentage: 50,
+      });
+      const first = usePlayerStore.getState().focusedEaseSegment;
+      if (!first) throw new Error("expected focused ease request");
+      expect(first.projectId).toBe("project-a");
+      expect(first.sessionEpoch).toBeGreaterThan(0);
+      expect(first.nonce).toBeGreaterThan(0);
+
+      store.setFocusedEaseSegment({
+        elementId: "index.html#hero",
+        animationId: "animation-a",
+        tweenPercentage: 75,
+      });
+      const second = usePlayerStore.getState().focusedEaseSegment;
+      if (!second) throw new Error("expected replacement request");
+      expect(second.nonce).toBe(first.nonce + 1);
+
+      store.clearFocusedEaseSegment(first.nonce);
+      expect(usePlayerStore.getState().focusedEaseSegment).toBe(second);
+      store.clearFocusedEaseSegment(second.nonce);
+      expect(usePlayerStore.getState().focusedEaseSegment).toBeNull();
+    });
+
+    it("clears a pending request when the project session changes", () => {
+      const store = usePlayerStore.getState();
+      store.beginTimelineSession("project-a");
+      store.setFocusedEaseSegment({
+        elementId: "index.html#hero",
+        animationId: "animation-a",
+        tweenPercentage: 50,
+      });
+
+      store.beginTimelineSession("project-b");
+      expect(usePlayerStore.getState().focusedEaseSegment).toBeNull();
+    });
+
+    it("does not revive an old request after selecting away and back", () => {
+      const store = usePlayerStore.getState();
+      store.setSelectedElementId("index.html#a");
+      store.setFocusedEaseSegment({
+        elementId: "index.html#a",
+        animationId: "animation-a",
+        tweenPercentage: 50,
+      });
+
+      store.setSelectedElementId("index.html#b");
+      expect(usePlayerStore.getState().focusedEaseSegment).toBeNull();
+      store.setSelectedElementId("index.html#a");
+      expect(usePlayerStore.getState().focusedEaseSegment).toBeNull();
+    });
+
+    it("invalidates on a genuine selection-anchor change but not a same-anchor echo", () => {
+      const store = usePlayerStore.getState();
+      store.setSelection(new Set(["index.html#a", "index.html#b"]), "index.html#a");
+      store.setFocusedEaseSegment({
+        elementId: "index.html#a",
+        animationId: "animation-a",
+        tweenPercentage: 50,
+      });
+      const request = usePlayerStore.getState().focusedEaseSegment;
+
+      store.setSelectionAnchor("index.html#a");
+      expect(usePlayerStore.getState().focusedEaseSegment).toBe(request);
+      store.setSelectionAnchor("index.html#b");
+      expect(usePlayerStore.getState().focusedEaseSegment).toBeNull();
+    });
+  });
+
   describe("setIsPlaying", () => {
     it("sets isPlaying to true", () => {
       usePlayerStore.getState().setIsPlaying(true);
@@ -416,29 +492,36 @@ describe("usePlayerStore", () => {
     });
   });
 
-  describe("clipRevealRequest", () => {
-    it("starts null and carries the requested element id", () => {
-      expect(usePlayerStore.getState().clipRevealRequest).toBeNull();
-      usePlayerStore.getState().requestClipReveal("el-1");
-      expect(usePlayerStore.getState().clipRevealRequest?.elementId).toBe("el-1");
-    });
+  describe("timelineFocus", () => {
+    it("stamps project scope and carries the requested logical id", () => {
+      usePlayerStore.getState().beginTimelineSession("project-a");
+      usePlayerStore.getState().requestTimelineFocus("clip:el-1");
+      expect(usePlayerStore.getState().timelineFocus).toMatchObject({
+        id: "clip:el-1",
+        projectId: "project-a",
+        sessionEpoch: usePlayerStore.getState().timelineSessionEpoch,
+      });
+      const store = usePlayerStore.getState();
+      store.requestTimelineFocus("clip:el-1");
+      const first = usePlayerStore.getState().timelineFocus;
+      if (!first) throw new Error("expected timeline focus request");
+      store.clearTimelineFocus(first.nonce);
+      store.reset();
+      store.requestTimelineFocus("clip:el-1");
+      const second = usePlayerStore.getState().timelineFocus;
+      expect(second?.nonce).toBe(first.nonce + 1);
 
-    it("bumps the nonce on repeat requests for the same clip", () => {
-      usePlayerStore.getState().requestClipReveal("el-1");
-      const first = usePlayerStore.getState().clipRevealRequest;
-      usePlayerStore.getState().requestClipReveal("el-1");
-      const second = usePlayerStore.getState().clipRevealRequest;
-      expect(second?.nonce).not.toBe(first?.nonce);
-    });
-
-    it("clears via clearClipRevealRequest and on reset", () => {
-      usePlayerStore.getState().requestClipReveal("el-1");
-      usePlayerStore.getState().clearClipRevealRequest();
-      expect(usePlayerStore.getState().clipRevealRequest).toBeNull();
-
-      usePlayerStore.getState().requestClipReveal("el-2");
-      usePlayerStore.getState().reset();
-      expect(usePlayerStore.getState().clipRevealRequest).toBeNull();
+      store.beginTimelineSession("project-a");
+      store.requestTimelineFocus("clip:el-1");
+      const stale = usePlayerStore.getState().timelineFocus;
+      if (!stale) throw new Error("expected timeline focus request");
+      store.requestTimelineFocus("clip:el-2");
+      const replacement = usePlayerStore.getState().timelineFocus;
+      if (!replacement) throw new Error("expected replacement timeline focus request");
+      store.clearTimelineFocus(stale.nonce);
+      expect(usePlayerStore.getState().timelineFocus).toBe(replacement);
+      store.beginTimelineSession("project-b");
+      expect(usePlayerStore.getState().timelineFocus).toBeNull();
     });
   });
 

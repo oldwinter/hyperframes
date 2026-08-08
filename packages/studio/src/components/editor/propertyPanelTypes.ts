@@ -71,9 +71,15 @@ export interface PropertyPanelProps {
       onProgress?: (progress: BackgroundRemovalProgress) => void;
     },
   ) => Promise<BackgroundRemovalResult>;
-  onSetManualOffset: (element: DomEditSelection, next: { x: number; y: number }) => void;
-  onSetManualSize: (element: DomEditSelection, next: { width: number; height: number }) => void;
-  onSetManualRotation: (element: DomEditSelection, next: { angle: number }) => void;
+  onSetManualOffset: (
+    element: DomEditSelection,
+    next: { x: number; y: number },
+  ) => void | Promise<void>;
+  onSetManualSize: (
+    element: DomEditSelection,
+    next: { width: number; height: number },
+  ) => void | Promise<void>;
+  onSetManualRotation: (element: DomEditSelection, next: { angle: number }) => void | Promise<void>;
   onSetText: (value: string, fieldKey?: string) => void;
   onSetTextFieldStyle: (fieldKey: string, property: string, value: string) => void;
   onPreviewTextFieldStyle?: (fieldKey: string, property: string, value: string) => void;
@@ -123,8 +129,8 @@ export interface PropertyPanelProps {
   ) => void;
   onRemoveKeyframe?: (animationId: string, percentage: number) => void;
   onUpdateKeyframeEase?: (animationId: string, percentage: number, ease: string) => void;
-  onSetAllKeyframeEases?: (animationId: string, ease: string) => void;
   onUpdateSegmentEase?: NonNullable<GsapAnimationEditCallbacks["onUpdateSegmentEase"]>;
+  onSetAllKeyframeEases?: (animationId: string, ease: string) => void;
   onConvertToKeyframes?: (animationId: string, duration?: number) => void;
   onCommitAnimatedProperty?: (
     selection: DomEditSelection,

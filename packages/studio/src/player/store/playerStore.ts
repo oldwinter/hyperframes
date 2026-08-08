@@ -10,8 +10,11 @@ import {
 } from "../../utils/studioUiPreferences";
 import { clampTimelineZoomPercent, computePinnedZoomPercent } from "../components/timelineZoom";
 import { createKeyframeSlice, type KeyframeCacheEntry, type KeyframeSlice } from "./keyframeSlice";
+import { createTimelineFocusRequest, type TimelineFocusRequest } from "./timelineFocusState";
+import { createThumbnailSlice, type ThumbnailSlice } from "./thumbnailSlice";
 
 export type { KeyframeCacheEntry } from "./keyframeSlice";
+export { liveTime } from "./liveTime";
 
 export interface TimelineElement {
   id: string;
@@ -101,7 +104,7 @@ function resolveElementSelection(
   };
 }
 
-interface PlayerState extends KeyframeSlice {
+interface PlayerState extends KeyframeSlice, ThumbnailSlice {
   isPlaying: boolean;
   currentTime: number;
   duration: number;
@@ -220,15 +223,10 @@ interface PlayerState extends KeyframeSlice {
   requestSeek: (time: number) => void;
   clearSeekRequest: () => void;
 
-  /**
-   * Request the timeline to scroll a clip into view (e.g. clicking an
-   * already-added asset card in the sidebar). Consumed and cleared by
-   * useTimelineRevealClip. The nonce makes repeat requests for the same
-   * clip observable so a second click re-reveals after the user scrolls away.
-   */
-  clipRevealRequest: { elementId: string; nonce: number } | null;
-  requestClipReveal: (elementId: string) => void;
-  clearClipRevealRequest: () => void;
+  timelineFocus: TimelineFocusRequest | null;
+  timelineFocusNonce: number;
+  requestTimelineFocus: (id: string) => void;
+  clearTimelineFocus: (nonce: number) => void;
 
   lintFindingsByElement: Map<string, { count: number; messages: string[] }>;
   setLintFindingsByElement: (map: Map<string, { count: number; messages: string[] }>) => void;
@@ -279,19 +277,6 @@ interface BeatHistoryEntry {
   label: string;
 }
 
-// Lightweight pub-sub for current time during playback.
-// Bypasses React state so the RAF loop can update the playhead/time display
-// without triggering re-renders on every frame.
-type TimeListener = (time: number) => void;
-const _timeListeners = new Set<TimeListener>();
-export const liveTime = {
-  notify: (t: number) => _timeListeners.forEach((cb) => cb(t)),
-  subscribe: (cb: TimeListener) => {
-    _timeListeners.add(cb);
-    return () => _timeListeners.delete(cb);
-  },
-};
-
 export function createTimelineResetState() {
   return {
     isPlaying: false,
@@ -313,8 +298,8 @@ export function createTimelineResetState() {
     focusedEaseSegment: null,
     selectedElementIds: new Set<string>(),
     requestedSeekTime: null,
-    clipRevealRequest: null,
     lintFindingsByElement: new Map<string, { count: number; messages: string[] }>(),
+    timelineFocus: null,
     keyframeCache: new Map<string, KeyframeCacheEntry>(),
     gsapAnimations: new Map<string, GsapAnimation[]>(),
     beatAnalysis: null,
@@ -352,7 +337,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   activeTool: "select",
   setActiveTool: (tool) => set({ activeTool: tool }),
 
-  ...createKeyframeSlice(set),
+  ...createKeyframeSlice(set, () => ({
+    timelineProjectId: get().timelineProjectId,
+    timelineSessionEpoch: get().timelineSessionEpoch,
+  })),
+  ...createThumbnailSlice(set),
 
   activeKeyframePct: null,
   setActiveKeyframePct: (pct) => set({ activeKeyframePct: pct }),
@@ -384,12 +373,23 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   requestSeek: (time) => set({ requestedSeekTime: time }),
   clearSeekRequest: () => set({ requestedSeekTime: null }),
 
-  clipRevealRequest: null,
-  requestClipReveal: (elementId) =>
-    set((s) => ({
-      clipRevealRequest: { elementId, nonce: (s.clipRevealRequest?.nonce ?? 0) + 1 },
-    })),
-  clearClipRevealRequest: () => set({ clipRevealRequest: null }),
+  timelineFocus: null,
+  timelineFocusNonce: 0,
+  requestTimelineFocus: (id) =>
+    set((s) => {
+      const nonce = s.timelineFocusNonce + 1;
+      return {
+        timelineFocusNonce: nonce,
+        timelineFocus: createTimelineFocusRequest(
+          id,
+          s.timelineProjectId,
+          s.timelineSessionEpoch,
+          nonce,
+        ),
+      };
+    }),
+  clearTimelineFocus: (nonce) =>
+    set((s) => (s.timelineFocus?.nonce === nonce ? { timelineFocus: null } : s)),
 
   lintFindingsByElement: new Map(),
   setLintFindingsByElement: (map) => set({ lintFindingsByElement: map }),
@@ -541,6 +541,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
             selectedElementIds,
             activeKeyframePct: null,
             motionPathArmed: false,
+            focusedEaseSegment: null,
           }
         : { selectedElementId: id, selectedElementIds };
     }),
@@ -550,9 +551,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setSelectionAnchor: (id) =>
     set((s) => {
       if (id != null && s.selectedElementIds.size > 1 && s.selectedElementIds.has(id)) {
-        return { selectedElementId: id };
+        return {
+          selectedElementId: id,
+          focusedEaseSegment: id === s.selectedElementId ? s.focusedEaseSegment : null,
+        };
       }
-      return { selectedElementId: id, selectedElementIds: id ? new Set([id]) : new Set<string>() };
+      return {
+        selectedElementId: id,
+        selectedElementIds: id ? new Set([id]) : new Set<string>(),
+        focusedEaseSegment: id === s.selectedElementId ? s.focusedEaseSegment : null,
+      };
     }),
   updateElement: (elementId, updates) =>
     set((state) => ({
@@ -560,9 +568,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
         (el.key ?? el.id) === elementId ? { ...el, ...updates } : el,
       ),
     })),
-  // playbackRate, audioMuted, loopEnabled, zoomMode, and manualZoomPercent are
-  // intentionally absent from createTimelineResetState because they are user
-  // preferences that survive both source refreshes and project switches.
+  // UI preferences intentionally survive reset. So do timelineSessionEpoch and
+  // focusedEaseRequestNonce: the epoch advances only when project identity
+  // changes, while a monotonic nonce prevents collisions with stale consumers.
   beginTimelineSession: (projectId) =>
     set((state) => {
       if (state.timelineProjectId === projectId) return state;
@@ -575,18 +583,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   reset: () => set(createTimelineResetState()),
 }));
 
-// Bug-bash aid: expose the store so a reproduction can dump live state from the
-// console, e.g. `__playerStore.getState().selectedElementId`. Harmless read
-// handle; no behavioural effect.
-// Only in dev. `import.meta.env` may be undefined in non-Vite bundlers (Next.js
-// Turbopack), so guard the access like the telemetry client does.
 function isDevBuild(): boolean {
   try {
     return import.meta.env.DEV === true;
   } catch {
+    // Turbopack and other non-Vite bundlers may not provide import.meta.env.
     return false;
   }
 }
 if (isDevBuild() && typeof window !== "undefined") {
+  // Console handle for dumping live Studio state during bug-bash reproduction.
   (window as unknown as { __playerStore?: typeof usePlayerStore }).__playerStore = usePlayerStore;
 }

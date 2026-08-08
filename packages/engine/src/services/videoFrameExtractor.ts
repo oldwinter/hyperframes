@@ -9,15 +9,31 @@
 import { copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, rmSync } from "fs";
 import { isAbsolute, join, posix, resolve, sep } from "path";
 import { parseHTML } from "linkedom";
-import { decodeUrlPathVariants, MEDIA_DURATION_CLAMP_EPSILON_SECONDS } from "@hyperframes/core";
+import {
+  decodeUrlPathVariants,
+  fpsToFfmpegArg,
+  fpsToNumber,
+  MEDIA_DURATION_CLAMP_EPSILON_SECONDS,
+  toFps,
+  type FpsInput,
+} from "@hyperframes/core";
 import { resolveReferencedStart, type RefResolverEl } from "./referenceResolver.js";
-import { extractMediaMetadata, type VideoMetadata } from "../utils/ffprobe.js";
+import {
+  extractFinalVideoFrameTimestamp,
+  extractMediaMetadata,
+  type VideoMetadata,
+} from "../utils/ffprobe.js";
 import {
   analyzeCompositionHdr,
   isHdrColorSpace as isHdrColorSpaceUtil,
   type HdrTransfer,
 } from "../utils/hdr.js";
-import { downloadToTemp, isHttpUrl, UrlDownloadError } from "../utils/urlDownloader.js";
+import {
+  downloadToTemp,
+  isHttpUrl,
+  UrlDownloadError,
+  writeUrlDownloadTelemetry,
+} from "../utils/urlDownloader.js";
 import { runFfmpeg } from "../utils/runFfmpeg.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
 import { unwrapTemplate } from "../utils/htmlTemplate.js";
@@ -77,12 +93,96 @@ export function isVideoFrameFormat(value: unknown): value is VideoFrameFormat {
   return typeof value === "string" && (VIDEO_FRAME_FORMATS as readonly string[]).includes(value);
 }
 
+/**
+ * Resolve the frame count produced for a requested extraction duration.
+ *
+ * CFR extraction uses FFmpeg's fps filter, whose end boundary rounds to the
+ * nearest frame. The VFR path normalizes with `-fps_mode cfr -r`, whose end
+ * boundary rounds up. Keep this calculation shared by superset slicing and
+ * producer coverage accounting so a complete VFR extraction cannot be
+ * rejected because the two paths disagree by one frame.
+ */
+export function extractionFrameCountForDuration(
+  durationSeconds: number,
+  fps: FpsInput,
+  isVFR: boolean,
+): number {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return 0;
+  // FFmpeg receives `String(durationSeconds)` and parses at microsecond
+  // precision. Derive the integer microseconds from that same decimal text:
+  // multiplying the binary float first is not equivalent (`2.05 * 1e6` is
+  // 2049999.9999999998 in JS and would incorrectly truncate one microsecond).
+  const serialized = String(durationSeconds).toLowerCase();
+  const decimal = /^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/.exec(serialized);
+  if (!decimal) return 0;
+  const whole = decimal[1] ?? "0";
+  const fraction = decimal[2] ?? "";
+  const exponent = Number.parseInt(decimal[3] ?? "0", 10);
+  const digits = BigInt(`${whole}${fraction}`);
+  const microsecondScale = exponent + 6 - fraction.length;
+  const microseconds =
+    microsecondScale >= 0
+      ? digits * 10n ** BigInt(microsecondScale)
+      : digits / 10n ** BigInt(-microsecondScale);
+
+  // Keep the frame-boundary calculation rational too. Converting the exact
+  // microseconds back to a binary float recreates the same problem at .5-frame
+  // boundaries (`2.05 * 30` is 61.49999999999999 in JS).
+  let fpsNumerator: bigint;
+  let fpsDenominator: bigint;
+  if (typeof fps === "object") {
+    if (
+      !Number.isSafeInteger(fps.num) ||
+      !Number.isSafeInteger(fps.den) ||
+      fps.num <= 0 ||
+      fps.den <= 0
+    ) {
+      return 0;
+    }
+    fpsNumerator = BigInt(fps.num);
+    fpsDenominator = BigInt(fps.den);
+  } else {
+    if (!Number.isFinite(fps) || fps <= 0) return 0;
+    // Number-only callers retain their decimal FFmpeg argument exactly. The
+    // production render path supplies Fps, so NTSC rates never round-trip
+    // through `String(30000 / 1001)` here.
+    const serializedFps = String(fps).toLowerCase();
+    const fpsDecimal = /^(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/.exec(serializedFps);
+    if (!fpsDecimal) return 0;
+    const fpsWhole = fpsDecimal[1] ?? "0";
+    const fpsFraction = fpsDecimal[2] ?? "";
+    const fpsExponent = Number.parseInt(fpsDecimal[3] ?? "0", 10);
+    const fpsDigits = BigInt(`${fpsWhole}${fpsFraction}`);
+    const fpsScale = fpsExponent - fpsFraction.length;
+    fpsNumerator = fpsScale >= 0 ? fpsDigits * 10n ** BigInt(fpsScale) : fpsDigits;
+    fpsDenominator = fpsScale >= 0 ? 1n : 10n ** BigInt(-fpsScale);
+  }
+
+  const frameNumerator = microseconds * fpsNumerator;
+  const frameDenominator = 1_000_000n * fpsDenominator;
+  const frameCount = isVFR
+    ? (frameNumerator + frameDenominator - 1n) / frameDenominator
+    : (2n * frameNumerator + frameDenominator) / (2n * frameDenominator);
+  const frames = Number(frameCount);
+  return Math.max(1, Number.isSafeInteger(frames) ? frames : Number.MAX_SAFE_INTEGER);
+}
+
 export interface ExtractionOptions {
-  fps: number;
+  /** Exact configured rate. Rational rates are passed to FFmpeg verbatim. */
+  fps: FpsInput;
   outputDir: string;
   quality?: number;
   format?: VideoFrameFormat;
   sdrToHdrTransfer?: HdrTransfer;
+  /** Extract exactly one frame at `startTime`. Used only after ffprobe has
+   *  resolved the actual final decoded-frame timestamp for a held tail. */
+  finalFrameOnly?: boolean;
+  /**
+   * Absolute composition/timeline end in seconds. Applied only after source
+   * metadata resolves open-ended/natural-duration media. Invisible negative
+   * preroll is trimmed while advancing mediaStart to preserve source alignment.
+   */
+  timelineEnd?: number;
   /**
    * Bounded per-source FFmpeg retries. Default 0 preserves stable behavior;
    * the producer may canary at most one retry after observing typed failures.
@@ -244,6 +344,14 @@ export function classifyVideoExtractionError(error: unknown): VideoSourceExtract
         "source_rejected",
         false,
         "Video source download was rejected",
+        diagnostic,
+      );
+    }
+    if (error.kind === "invalid_payload") {
+      return new VideoSourceExtractionError(
+        "invalid_media",
+        false,
+        "Video source download returned a non-media payload",
         diagnostic,
       );
     }
@@ -444,7 +552,10 @@ export function parseVideoElements(html: string): VideoElement[] {
     // reference; the resolver handles both.
     const start = startAttr ? resolveReferencedStart(document, el, startCache, visiting) : 0;
     // Derive end from data-end → data-start+data-duration → Infinity (natural duration).
-    // The caller (htmlCompiler) clamps Infinity to the composition's absoluteEnd.
+    // Static compilation cannot always clamp root media because GSAP may supply
+    // the root duration at runtime. The producer passes the resolved timeline
+    // end into frame extraction, which caps the source duration only after the
+    // natural duration is known without rewriting authored timing metadata.
     let end = 0;
     if (endAttr) {
       end = parseFloat(endAttr);
@@ -531,7 +642,10 @@ export async function extractVideoFramesRange(
   outputDirOverride?: string,
 ): Promise<ExtractedFrames> {
   const ffmpegProcessTimeout = config?.ffmpegProcessTimeout ?? DEFAULT_CONFIG.ffmpegProcessTimeout;
-  const { fps, outputDir, quality = 95 } = options;
+  const { outputDir, quality = 95 } = options;
+  const normalizedFps = toFps(options.fps);
+  const fps = fpsToNumber(normalizedFps);
+  const ffmpegFps = fpsToFfmpegArg(normalizedFps);
 
   const videoOutputDir = outputDirOverride ?? join(outputDir, videoId);
   if (!existsSync(videoOutputDir)) mkdirSync(videoOutputDir, { recursive: true });
@@ -542,20 +656,21 @@ export async function extractVideoFramesRange(
   } catch (error) {
     throw classifyVideoExtractionError(error);
   }
-  if (!(metadata.durationSeconds > 0)) {
+  const playableDuration = resolvePlayableVideoDuration(metadata);
+  if (!(playableDuration > 0)) {
     throw new VideoSourceExtractionError(
       "invalid_media",
       false,
       "Video source has no positive duration",
-      `Video source duration is ${metadata.durationSeconds}s`,
+      `Playable video stream duration is ${playableDuration}s`,
     );
   }
-  if (startTime >= metadata.durationSeconds) {
+  if (startTime >= playableDuration) {
     throw new VideoSourceExtractionError(
       "media_start_out_of_range",
       false,
       "Video media start is outside the source duration",
-      `Video media start ${startTime}s is outside source duration ${metadata.durationSeconds}s`,
+      `Video media start ${startTime}s is outside playable video duration ${playableDuration}s`,
     );
   }
   const format = resolveFrameFormat(metadata, options.format);
@@ -585,15 +700,23 @@ export async function extractVideoFramesRange(
   if (codecMayHaveAlpha(metadata.videoCodec)) {
     args.push("-c:v", decoderForCodec(metadata.videoCodec));
   }
-  args.push("-ss", String(startTime), "-i", videoPath, "-t", String(duration));
+  if (options.finalFrameOnly) {
+    // Output-side seek decodes from the start before selecting the final
+    // sample. This is intentionally reserved for the one-frame path: input
+    // seeking is faster, but valid unindexed transports (notably MPEG-TS with
+    // a negative timestamp base) can seek to EOF and emit zero frames.
+    args.push("-i", videoPath, "-ss", String(startTime), "-frames:v", "1");
+  } else {
+    args.push("-ss", String(startTime), "-i", videoPath, "-t", String(duration));
+  }
 
   const vfFilters: string[] = [];
   if (isHdr && isMacOS) {
     // VideoToolbox tone-maps during decode; force output to bt709 SDR format
     vfFilters.push("format=nv12");
   }
-  if (!metadata.isVFR) {
-    vfFilters.push(`fps=${fps}`);
+  if (!options.finalFrameOnly && !metadata.isVFR) {
+    vfFilters.push(`fps=${ffmpegFps}`);
   }
   if (options.sdrToHdrTransfer) {
     // Ordering intent: fps sampling runs BEFORE the colorspace remap so only
@@ -606,7 +729,9 @@ export async function extractVideoFramesRange(
     vfFilters.push(SDR_TO_HDR_COLORSPACE_FILTER);
   }
   if (vfFilters.length > 0) args.push("-vf", vfFilters.join(","));
-  if (metadata.isVFR) args.push("-fps_mode", "cfr", "-r", String(fps));
+  if (!options.finalFrameOnly && metadata.isVFR) {
+    args.push("-fps_mode", "cfr", "-r", ffmpegFps);
+  }
 
   args.push("-q:v", format === "jpg" ? String(Math.ceil((100 - quality) / 3)) : "0");
   // Render-scoped temp frames are read once; level 1 measured 3-5x faster for ~14% larger files.
@@ -718,11 +843,223 @@ export function classifyFfmpegSpawnError(error: unknown, stderr = ""): VideoSour
 function resolveSegmentDuration(
   requested: number,
   mediaStart: number,
-  metadata: VideoMetadata,
+  sourceDuration: number,
 ): number {
   if (Number.isFinite(requested) && requested > 0) return requested;
-  const sourceRemaining = metadata.durationSeconds - mediaStart;
-  return sourceRemaining > 0 ? sourceRemaining : metadata.durationSeconds;
+  const sourceRemaining = sourceDuration - mediaStart;
+  return sourceRemaining > 0 ? sourceRemaining : sourceDuration;
+}
+
+/**
+ * Return the range that can actually produce video frames.
+ *
+ * Container duration may include a longer audio stream or mux padding. Using
+ * it for video extraction planning can reserve raw-frame scratch for seconds
+ * where no video frames exist. `extractMediaMetadata` already falls back to
+ * the container duration when ffprobe omits the stream duration; keep the
+ * explicit fallback here for callers supplying older/manual metadata.
+ */
+export function resolvePlayableVideoDuration(metadata: VideoMetadata): number {
+  return Number.isFinite(metadata.videoStreamDurationSeconds) &&
+    metadata.videoStreamDurationSeconds > 0
+    ? metadata.videoStreamDurationSeconds
+    : metadata.durationSeconds;
+}
+
+export interface TimelineExtractionWindow {
+  compositionStart: number;
+  mediaStart: number;
+  durationSeconds: number;
+  /**
+   * Preserve the authored timeline origin and mediaStart for lookup. This is
+   * required when a looped visible interval crosses a source boundary and
+   * still needs modulo phase against the complete extracted source cycle.
+   */
+  preserveTimelinePhase?: boolean;
+  /**
+   * Keep the authored end while rebasing start/mediaStart to the extracted
+   * source suffix. Non-looping lookup then holds the suffix's final frame
+   * through the remainder of the authored slot.
+   */
+  preserveTimelineEnd?: boolean;
+  /** This window reaches a held tail and must be checked against the actual
+   *  final decoded-frame timestamp before extraction. */
+  ensureFinalFrame?: boolean;
+  /** Source timestamp used by FFmpeg when it differs from the logical lookup
+   *  mediaStart (the one-frame held-tail representation). */
+  extractionMediaStart?: number;
+  /** FFmpeg emits one decoded frame; lookup then holds that frame. */
+  finalFrameOnly?: boolean;
+}
+
+type TimelineWindowVideo = Pick<VideoElement, "start" | "end" | "mediaStart"> &
+  Partial<Pick<VideoElement, "loop">>;
+
+// Logical duration assigned to a one-frame held-tail representation. This is
+// deliberately below any supported output frame interval: coverage expects
+// one frame, while FFmpeg seeks to the separately probed real frame timestamp.
+const FINAL_FRAME_LOGICAL_DURATION_SECONDS = 1e-6;
+
+/**
+ * Intersect an authored slot with the render timeline, then select the
+ * smallest playable source range that preserves timeline lookup semantics.
+ *
+ * A finite authored slot can outlive the source. In that case FFmpeg should
+ * still extract at most one source range: lookup either wraps that range for
+ * loops or holds its final frame for non-looping video. Keeping the authored
+ * timeline origin separate from the extracted range is what makes both
+ * behaviours survive the source-duration cap.
+ */
+export function resolveTimelineExtractionWindow(
+  video: TimelineWindowVideo,
+  resolvedDuration: number,
+  timelineEnd?: number,
+  sourceDuration?: number,
+): TimelineExtractionWindow {
+  if (timelineEnd === undefined) {
+    return {
+      compositionStart: video.start,
+      mediaStart: video.mediaStart,
+      durationSeconds: resolvedDuration,
+    };
+  }
+  if (!Number.isFinite(timelineEnd)) {
+    throw new Error(`Video extraction timelineEnd must be finite; got ${String(timelineEnd)}`);
+  }
+  const compositionStart = Math.max(0, video.start);
+  const trimmedPreroll = compositionStart - video.start;
+  const timelineDuration = Math.max(0, timelineEnd - compositionStart);
+  // Infinity means "natural source duration", not an authored infinite slot.
+  // Explicit finite slots may outlive the source (loop or held tail), while an
+  // omitted duration remains source-bounded exactly like the browser runtime.
+  const resolvedVisibleDuration = resolvedDuration - trimmedPreroll;
+  const visibleDuration = Math.max(0, Math.min(resolvedVisibleDuration, timelineDuration));
+  let mediaStart = video.mediaStart + trimmedPreroll;
+  if (visibleDuration > 0 && sourceDuration !== undefined) {
+    const sourceRemaining = Math.max(0, sourceDuration - video.mediaStart);
+    if (sourceRemaining > 0 && video.loop && Number.isFinite(video.end)) {
+      const phaseOffset = trimmedPreroll % sourceRemaining;
+      const phaseRemaining = sourceRemaining - phaseOffset;
+      // The element visibility contract includes its end boundary. Preserve a
+      // complete cycle on equality as well, otherwise a rebased suffix would
+      // wrap to its own first frame instead of the source cycle's first frame.
+      if (visibleDuration >= phaseRemaining) {
+        return {
+          compositionStart: video.start,
+          mediaStart: video.mediaStart,
+          durationSeconds: sourceRemaining,
+          preserveTimelinePhase: true,
+        };
+      }
+      mediaStart = video.mediaStart + phaseOffset;
+    } else if (sourceRemaining > 0) {
+      const sourceVisibleAfterPreroll = Math.max(0, sourceRemaining - trimmedPreroll);
+      if (visibleDuration <= sourceVisibleAfterPreroll) {
+        return {
+          compositionStart,
+          mediaStart,
+          durationSeconds: visibleDuration,
+        };
+      }
+
+      // The visible interval enters (or is entirely inside) the held tail.
+      // Extract the visible source suffix. If preroll is already at/past the
+      // final decoded timestamp, the async resolver below replaces this tiny
+      // provisional suffix with one exact final frame.
+      const extractionDuration = Math.min(
+        sourceRemaining,
+        Math.max(sourceVisibleAfterPreroll, FINAL_FRAME_LOGICAL_DURATION_SECONDS),
+      );
+      const extractionOffset = sourceRemaining - extractionDuration;
+      return {
+        compositionStart: video.start + extractionOffset,
+        mediaStart: video.mediaStart + extractionOffset,
+        durationSeconds: extractionDuration,
+        preserveTimelineEnd: true,
+        ensureFinalFrame: true,
+      };
+    }
+  }
+  return {
+    compositionStart,
+    mediaStart,
+    durationSeconds: visibleDuration,
+  };
+}
+
+/**
+ * Replace a held-tail suffix that starts at/after the final decoded timestamp
+ * with one exact frame. This keeps raw HDR scratch O(one frame) without
+ * assuming a one-second seek window contains a CFR/VFR timestamp.
+ */
+export async function resolveFinalFrameExtractionWindow(
+  videoPath: string,
+  video: TimelineWindowVideo,
+  metadata: VideoMetadata,
+  window: TimelineExtractionWindow,
+  signal?: AbortSignal,
+): Promise<TimelineExtractionWindow> {
+  if (!window.ensureFinalFrame) return window;
+  const playableDuration = resolvePlayableVideoDuration(metadata);
+  const finalFrameTimestamp = await extractFinalVideoFrameTimestamp(
+    videoPath,
+    {
+      videoStreamDurationSeconds: playableDuration,
+      videoStreamStartSeconds: metadata.videoStreamStartSeconds,
+    },
+    signal,
+  );
+  if (window.mediaStart < finalFrameTimestamp - 1e-9) return window;
+
+  const sourceRemaining = playableDuration - video.mediaStart;
+  const logicalDuration = Math.min(sourceRemaining, FINAL_FRAME_LOGICAL_DURATION_SECONDS);
+  return {
+    compositionStart: Math.max(0, video.start),
+    mediaStart: playableDuration - logicalDuration,
+    extractionMediaStart: finalFrameTimestamp,
+    durationSeconds: logicalDuration,
+    preserveTimelineEnd: true,
+    finalFrameOnly: true,
+  };
+}
+
+/** Resolve source duration first, then intersect it with the render timeline. */
+export function resolveVideoExtractionWindow(
+  video: TimelineWindowVideo,
+  metadata: VideoMetadata,
+  timelineEnd?: number,
+): TimelineExtractionWindow {
+  const playableDuration = resolvePlayableVideoDuration(metadata);
+  if (!(playableDuration > 0)) {
+    throw new VideoSourceExtractionError(
+      "invalid_media",
+      false,
+      "Video source has no positive duration",
+      `Playable video stream duration is ${playableDuration}s`,
+    );
+  }
+  if (video.mediaStart >= playableDuration) {
+    throw new VideoSourceExtractionError(
+      "media_start_out_of_range",
+      false,
+      "Video media start is outside the source duration",
+      `Video media start ${video.mediaStart}s is outside playable video duration ${playableDuration}s`,
+    );
+  }
+  const resolvedDuration = resolveSegmentDuration(
+    video.end - video.start,
+    video.mediaStart,
+    playableDuration,
+  );
+  return resolveTimelineExtractionWindow(video, resolvedDuration, timelineEnd, playableDuration);
+}
+
+export function resolveVideoExtractionDuration(
+  video: TimelineWindowVideo,
+  metadata: VideoMetadata,
+  timelineEnd?: number,
+): number {
+  return resolveVideoExtractionWindow(video, metadata, timelineEnd).durationSeconds;
 }
 
 /**
@@ -761,6 +1098,8 @@ type PreparedExtraction = {
   index: number;
   metadata: VideoMetadata;
   videoDuration: number;
+  extractionMediaStart: number;
+  finalFrameOnly: boolean;
   format: CacheFrameFormat;
   sdrToHdrTransfer?: HdrTransfer;
   dedupeKey: string;
@@ -831,7 +1170,13 @@ function linkOrCopyFrame(src: string, dest: string): void {
 }
 
 function supersetGroupingKey(work: PreparedExtraction, fps: number): string {
-  return [work.videoPath, String(fps), work.format, work.sdrToHdrTransfer ?? ""].join("\0");
+  return [
+    work.videoPath,
+    String(fps),
+    work.format,
+    work.sdrToHdrTransfer ?? "",
+    work.finalFrameOnly ? "final" : "range",
+  ].join("\0");
 }
 
 function isIntegralFrameOffset(offsetSeconds: number, fps: number): boolean {
@@ -854,6 +1199,13 @@ function buildSupersetGroup(
   fps: number,
 ): SupersetGroupPlan | null {
   if (misses.length < 2) return null;
+  if (misses.some(({ work }) => work.finalFrameOnly)) return null;
+  // VFR normalization (`-fps_mode cfr -r`) establishes its duplicate/drop
+  // phase relative to each seek. A union extraction therefore cannot be
+  // sliced into the same frames as independently sought member ranges, even
+  // when their offsets land on an integral output-frame boundary. Keep VFR
+  // ranges direct until the extractor has a proven absolute timestamp phase.
+  if (misses.some(({ work }) => work.metadata.isVFR)) return null;
   const baseStart = Math.min(...misses.map(({ work }) => work.video.mediaStart));
   if (!misses.every(({ work }) => isIntegralFrameOffset(work.video.mediaStart - baseStart, fps))) {
     return null;
@@ -933,6 +1285,7 @@ function sliceSupersetMember(
   superset: ExtractedFrames,
   outputDir: string,
   fps: number,
+  configuredFps: FpsInput,
 ): ExtractedFrames {
   const { work } = member.miss;
   rmSync(outputDir, { recursive: true, force: true });
@@ -942,7 +1295,11 @@ function sliceSupersetMember(
   // offset_i + k, so its source time is
   // baseStart + (offset_i + k) / fps = mediaStart_i + k / fps.
   // The frame-alignment precondition is what makes offset_i integral.
-  const requestedFrames = Math.round(work.videoDuration * fps);
+  const requestedFrames = extractionFrameCountForDuration(
+    work.videoDuration,
+    configuredFps,
+    work.metadata.isVFR,
+  );
   const availableFrames = Math.max(0, superset.totalFrames - member.offsetFrames);
   const frameCount = Math.min(requestedFrames, availableFrames);
   for (let i = 0; i < frameCount; i += 1) {
@@ -1029,6 +1386,14 @@ export async function extractAllVideoFrames(
   >,
   compiledDir?: string,
 ): Promise<ExtractionResult> {
+  if (options.timelineEnd !== undefined && !Number.isFinite(options.timelineEnd)) {
+    throw new Error(
+      `Video extraction timelineEnd must be finite; got ${String(options.timelineEnd)}`,
+    );
+  }
+  const configuredFps = toFps(options.fps);
+  const fps = fpsToNumber(configuredFps);
+  const fpsKey = fpsToFfmpegArg(configuredFps);
   const startTime = Date.now();
   const extracted: ExtractedFrames[] = [];
   const errors: VideoExtractionFailure[] = [];
@@ -1062,6 +1427,7 @@ export async function extractAllVideoFrames(
   const warnedSrcs = new Set<string>();
   for (const video of videos) {
     if (signal?.aborted) break;
+    if (options.timelineEnd !== undefined && video.start >= options.timelineEnd) continue;
     try {
       let videoPath = video.src;
       if (!isHttpUrl(videoPath)) {
@@ -1071,8 +1437,13 @@ export async function extractAllVideoFrames(
       if (isHttpUrl(videoPath)) {
         const downloadDir = join(options.outputDir, "_downloads");
         mkdirSync(downloadDir, { recursive: true });
-        videoPath = await downloadToTemp(videoPath, downloadDir, undefined, signal, () =>
-          recordTransientRetries(1),
+        videoPath = await downloadToTemp(
+          videoPath,
+          downloadDir,
+          undefined,
+          signal,
+          () => recordTransientRetries(1),
+          { onTelemetry: writeUrlDownloadTelemetry },
         );
       }
 
@@ -1113,10 +1484,11 @@ export async function extractAllVideoFrames(
   breakdown.resolveMs = Date.now() - phase1Start;
 
   // Snapshot the pre-preflight key inputs so the extraction cache keys on the
-  // user-visible source (original path, original mediaStart, original segment
-  // bounds) rather than the workDir-local normalized file produced by the
+  // user-visible source path rather than the
+  // workDir-local normalized file produced by the
   // HDR preflight. Without this, every render would write a new
   // normalized file with a fresh mtime → fresh cache key → perpetual misses.
+  // Phase 3 updates mediaStart after trimming any invisible negative preroll.
   const cacheKeyInputs = resolvedVideos.map(({ video, videoPath }) => {
     const stat = readKeyStat(videoPath);
     // Missing files return null — skip the cache path for that entry. The
@@ -1129,8 +1501,6 @@ export async function extractAllVideoFrames(
       mtimeMs: stat.mtimeMs,
       size: stat.size,
       mediaStart: video.mediaStart,
-      start: video.start,
-      end: video.end,
     };
   });
 
@@ -1217,12 +1587,13 @@ export async function extractAllVideoFrames(
         // Guard against mediaStart past EOF — FFmpeg's `-ss` silently produces
         // a 0-byte file when seeking beyond the source duration, and the
         // downstream extractor then points at a broken input.
-        if (entry.video.mediaStart >= metadata.durationSeconds) {
+        const playableDuration = resolvePlayableVideoDuration(metadata);
+        if (entry.video.mediaStart >= playableDuration) {
           errors.push({
             videoId: entry.video.id,
             kind: "media_start_out_of_range",
             retryable: false,
-            error: `SDR→HDR conversion skipped: mediaStart (${entry.video.mediaStart}s) ≥ source duration (${metadata.durationSeconds}s)`,
+            error: `SDR→HDR conversion skipped: mediaStart (${entry.video.mediaStart}s) ≥ playable video duration (${playableDuration}s)`,
           });
           hdrSkippedIndices.add(i);
           continue;
@@ -1289,19 +1660,27 @@ export async function extractAllVideoFrames(
     };
   }
 
-  type PreparedExtractionResult = { work: PreparedExtraction } | { error: VideoExtractionFailure };
+  type PreparedExtractionResult =
+    | { work: PreparedExtraction }
+    | { error: VideoExtractionFailure }
+    | { skipped: true };
 
   type ExtractionOutcome = { result: ExtractedFrames } | { error: VideoExtractionFailure };
 
   function scopedExtractionOptions(work: PreparedExtraction): ExtractionOptions {
-    return { ...options, format: work.format, sdrToHdrTransfer: work.sdrToHdrTransfer };
+    return {
+      ...options,
+      format: work.format,
+      sdrToHdrTransfer: work.sdrToHdrTransfer,
+      finalFrameOnly: work.finalFrameOnly,
+    };
   }
 
   function rehydratePublishedCache(work: PreparedExtraction, target: CacheMissTarget) {
     const rehydrated = rehydrateCacheEntry(target.entry, {
       videoId: work.video.id,
       srcPath: target.srcPath,
-      fps: options.fps,
+      fps,
       format: work.format,
       metadata: work.metadata,
     });
@@ -1312,22 +1691,19 @@ export async function extractAllVideoFrames(
     if (!cacheRootDir) return { work };
     const keyInput = cacheKeyInputs[work.index];
     if (!keyInput) return { work };
-    const transform = work.sdrToHdrTransfer
-      ? sdrToHdrTransformKey(work.sdrToHdrTransfer)
-      : undefined;
+    const transformParts = [
+      work.sdrToHdrTransfer ? sdrToHdrTransformKey(work.sdrToHdrTransfer) : undefined,
+      work.finalFrameOnly ? "final-frame" : undefined,
+    ].filter((part): part is string => part !== undefined);
+    const transform = transformParts.length > 0 ? transformParts.join("+") : undefined;
 
-    const keyDuration = resolveSegmentDuration(
-      keyInput.end - keyInput.start,
-      keyInput.mediaStart,
-      work.metadata,
-    );
     const lookup = lookupCacheEntry(cacheRootDir, {
       videoPath: keyInput.videoPath,
       mtimeMs: keyInput.mtimeMs,
       size: keyInput.size,
       mediaStart: keyInput.mediaStart,
-      duration: keyDuration,
-      fps: options.fps,
+      duration: work.videoDuration,
+      fps: fpsKey,
       format: work.format,
       transform,
     });
@@ -1356,7 +1732,7 @@ export async function extractAllVideoFrames(
           extractVideoFramesRange(
             work.videoPath,
             work.video.id,
-            work.video.mediaStart,
+            work.extractionMediaStart,
             work.videoDuration,
             scopedExtractionOptions(work),
             signal,
@@ -1382,7 +1758,7 @@ export async function extractAllVideoFrames(
         extractVideoFramesRange(
           work.videoPath,
           work.video.id,
-          work.video.mediaStart,
+          work.extractionMediaStart,
           work.videoDuration,
           scopedExtractionOptions(work),
           signal,
@@ -1430,12 +1806,13 @@ export async function extractAllVideoFrames(
         member,
         superset,
         join(options.outputDir, work.video.id),
-        options.fps,
+        fps,
+        configuredFps,
       );
     }
 
     const partialDir = partialCacheEntryDir(cacheTarget.entry);
-    const sliced = sliceSupersetMember(member, superset, partialDir, options.fps);
+    const sliced = sliceSupersetMember(member, superset, partialDir, fps, configuredFps);
     const published = publishCacheEntry(cacheTarget.entry, partialDir);
     if (!published.published) {
       breakdown.cachePublishFailures += 1;
@@ -1516,18 +1893,33 @@ export async function extractAllVideoFrames(
       }
       try {
         const metadata = videoMetadata[index] ?? (await extractMediaMetadata(videoPath));
-        const videoDuration = resolveSegmentDuration(
-          video.end - video.start,
-          video.mediaStart,
+        const initialWindow = resolveVideoExtractionWindow(video, metadata, options.timelineEnd);
+        const window = await resolveFinalFrameExtractionWindow(
+          videoPath,
+          video,
           metadata,
+          initialWindow,
+          signal,
         );
-        if (video.end - video.start !== videoDuration) {
-          video.end = video.start + videoDuration;
+        const videoDuration = window.durationSeconds;
+        if (videoDuration <= 0) {
+          return { skipped: true };
         }
+        if (!window.preserveTimelinePhase) {
+          video.start = window.compositionStart;
+          if (!window.preserveTimelineEnd) {
+            video.end = window.compositionStart + videoDuration;
+          }
+          video.mediaStart = window.mediaStart;
+        }
+        const keyInput = cacheKeyInputs[index];
+        const extractionMediaStart = window.extractionMediaStart ?? window.mediaStart;
+        if (keyInput) keyInput.mediaStart = extractionMediaStart;
 
         const format = resolveFrameFormat(metadata, options.format);
         const sdrToHdrTransfer = sdrToHdrTransfers[index];
-        const dedupeKey = `${videoPath}\0${video.mediaStart}\0${videoDuration}\0${options.fps}\0${format}\0${sdrToHdrTransfer ?? ""}`;
+        const finalFrameOnly = window.finalFrameOnly === true;
+        const dedupeKey = `${videoPath}\0${extractionMediaStart}\0${videoDuration}\0${fpsKey}\0${format}\0${sdrToHdrTransfer ?? ""}\0${finalFrameOnly ? "final" : "range"}`;
 
         return {
           work: {
@@ -1536,6 +1928,8 @@ export async function extractAllVideoFrames(
             index,
             metadata,
             videoDuration,
+            extractionMediaStart,
+            finalFrameOnly,
             format,
             sdrToHdrTransfer,
             dedupeKey,
@@ -1565,7 +1959,7 @@ export async function extractAllVideoFrames(
     }
   }
 
-  const supersetPlan = planSupersetGroups(cacheMisses, options.fps);
+  const supersetPlan = planSupersetGroups(cacheMisses, fps);
   const directOutcomes = await Promise.all(
     supersetPlan.direct.map(
       async (miss) =>
@@ -1581,11 +1975,20 @@ export async function extractAllVideoFrames(
     for (const [key, outcome] of groupOutcomes) uniqueOutcomes.set(key, outcome);
   }
 
-  const results: ExtractionOutcome[] = preparedExtractions.map((prepared) => {
-    if ("error" in prepared) return prepared;
+  const results: ExtractionOutcome[] = [];
+  for (const prepared of preparedExtractions) {
+    if ("skipped" in prepared) continue;
+    if ("error" in prepared) {
+      results.push(prepared);
+      continue;
+    }
     const outcome = uniqueOutcomes.get(prepared.work.dedupeKey);
-    if (!outcome)
-      return { error: extractionError(prepared.work.video.id, "missing extraction result") };
+    if (!outcome) {
+      results.push({
+        error: extractionError(prepared.work.video.id, "missing extraction result"),
+      });
+      continue;
+    }
     if ("error" in outcome) {
       // A shared (deduped/superset) failure fans out to every element with the
       // same key; annotate followers with the leader's videoId so N copies of
@@ -1594,17 +1997,18 @@ export async function extractAllVideoFrames(
       const message = isFollower
         ? `[shared extraction, leader ${outcome.error.videoId}] ${outcome.error.error}`
         : outcome.error.error;
-      return {
+      results.push({
         error: {
           videoId: prepared.work.video.id,
           kind: outcome.error.kind,
           retryable: outcome.error.retryable,
           error: message,
         },
-      };
+      });
+      continue;
     }
-    return { result: { ...outcome.result, videoId: prepared.work.video.id } };
-  });
+    results.push({ result: { ...outcome.result, videoId: prepared.work.video.id } });
+  }
 
   breakdown.extractMs = Date.now() - phase3Start;
 
@@ -1653,7 +2057,7 @@ function getFrameIndexAtTime(
 ): number | null {
   let localTime = globalTime - videoStart;
   if (localTime < 0) return null;
-  const loopDuration = Math.max(0, extracted.metadata.durationSeconds - mediaStart);
+  const loopDuration = Math.max(0, resolvePlayableVideoDuration(extracted.metadata) - mediaStart);
   if (loop && loopDuration > 0 && localTime >= loopDuration) {
     localTime %= loopDuration;
   }

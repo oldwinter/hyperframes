@@ -1,21 +1,20 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { BEAT_BAND_H } from "./BeatStrip";
-import {
-  KEYFRAME_DRAG_THRESHOLD_PX,
-  previewClipPct,
-  resolveKeyframeDrag,
-} from "../../components/editor/keyframeDrag";
 import { TimelineDiamondConnectors } from "./TimelineDiamondConnectors";
-import { clipToTweenPercentage } from "../../components/editor/KeyframeNavigation";
 import { LANE_H } from "./timelineLayout";
 import { STUDIO_PREVIEW_FPS } from "../lib/time";
 import { timelineKeyframeSelectionKey } from "./timelineKeyframeIdentity";
 import {
+  beginTimelineKeyframeRetime,
+  readPendingTimelineKeyframeRetimes,
+  subscribeTimelineKeyframeRetimePreview,
+  type TimelineKeyframeRetimeHandle,
+} from "./useTimelineKeyframeHandlers";
+import { timelineKeyframeFocusId } from "./timelineNavigationIdentity";
+import {
   DIAMOND_RATIO,
-  KF_MAX_PCT,
-  KF_MIN_PCT,
+  keyframeTimeLabel,
   keyframeTarget,
-  type DragState,
   type TimelineClipDiamondsProps,
   type TimelineDiamondKeyframe,
   type TimelineDiamondLaneProps,
@@ -69,13 +68,15 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
   keyframesData,
   clipWidthPx,
   clipHeightPx,
-  clipDuration,
   beatsActive,
   accentColor,
   isSelected,
   currentPercentage,
   elementId,
+  clipStart = 0,
+  clipDuration = 0,
   selectedKeyframes,
+  rovingTargetId = null,
   onClickKeyframe,
   onShiftClickKeyframe,
   onContextMenuKeyframe,
@@ -86,65 +87,29 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
   globalEase = "none",
 }: TimelineDiamondLaneProps) {
   // Hooks must run before the early return below.
-  const dragRef = useRef<DragState | null>(null);
-  // Pending retime destination (clip + tween %) per keyframe key, so a rapid
-  // second drag composes from where the first move left the keyframe (whose
-  // cache entry has not rebuilt yet) instead of the stale rendered value.
-  const pendingRetimeRef = useRef<Map<string, { clipPct: number; tweenPct: number }> | null>(null);
-  // Lazy: `useRef(new Map())` allocates a Map on every render and throws all but
-  // the first away, once per mounted lane.
-  pendingRetimeRef.current ??= new Map();
-  const pendingRetimes = pendingRetimeRef.current;
-  // The most recent retime dispatched from this lane, whichever diamond it came
-  // from. Selection is lane-wide, so "is my revert still relevant" is a lane-wide
-  // question, not a per-keyframe one.
-  const latestRetimeRef = useRef<{ clipPct: number; tweenPct: number } | null>(null);
-  useEffect(() => {
-    // Clear a pending entry once the authoritative cache reflects THAT keyframe
-    // at ~its destination. Match by tolerance, not equality: cache writers round
-    // clip %s, so an exact check would leak an entry after every successful
-    // retime. Match by identity too: a bare "some keyframe is near that %" test
-    // cleared the entry whenever an unrelated sibling happened to sit there,
-    // which is easy to hit on an evenly spaced row.
-    const pendingEntries = pendingRetimeRef.current;
-    if (!pendingEntries) return;
-    for (const [key, pending] of pendingEntries) {
-      const settled = keyframesData.keyframes.some(
-        (k) =>
-          timelineKeyframeSelectionKey(elementId, keyframeTarget(k)) === key &&
-          Math.abs(k.percentage - pending.clipPct) < 0.2,
-      );
-      if (settled) pendingEntries.delete(key);
-    }
-  }, [keyframesData.keyframes, elementId]);
+  // The retime itself lives on the stable scroll viewport (beginTimelineKeyframeRetime),
+  // so a row unmounted by virtualization mid-drag does not drop the gesture.
+  // This lane only arms it and renders the preview it publishes.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const retimeHandleRef = useRef<TimelineKeyframeRetimeHandle | null>(null);
+  // Retime destinations already dispatched but not yet in the keyframe cache, so
+  // a rapid second drag composes from where the first move left the keyframe
+  // instead of the stale rendered value.
+  const pendingRetimes = readPendingTimelineKeyframeRetimes(rootRef.current);
   // Visual-only preview of the dragged diamond's clip-% — no runtime/GSAP hold
   // (that optimistic hold was the #1763 flake). The atomic move-keyframe commit
   // on drop re-keys the diamond from source.
   const [preview, setPreview] = useState<{ kfKey: string; clipPct: number } | null>(null);
-  // One preview render per frame: a 120Hz trackpad fires pointermove far faster
-  // than the lane can repaint, and every diamond in the row re-evaluates its
-  // memo on each of those renders.
-  const previewFrameRef = useRef<number | null>(null);
-  const cancelPreviewFrame = () => {
-    if (previewFrameRef.current === null) return;
-    cancelAnimationFrame(previewFrameRef.current);
-    previewFrameRef.current = null;
-  };
-  // Escape backs out of an in-flight retime, the way clip and element drags
-  // already do. Nothing was written yet (the commit happens on pointerup), so
-  // dropping the preview is the whole undo.
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || !dragRef.current || dragRef.current.cancelled) return;
-      dragRef.current.cancelled = true;
-      cancelPreviewFrame();
-      setPreview(null);
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      cancelPreviewFrame();
-    };
+    const source = rootRef.current;
+    if (!source) return;
+    return subscribeTimelineKeyframeRetimePreview(source, (nextPreview) => {
+      setPreview(
+        nextPreview === null
+          ? null
+          : { kfKey: nextPreview.keyframeKey, clipPct: nextPreview.clipPercentage },
+      );
+    });
   }, []);
   // The button element can re-render (reposition/unmount) synchronously from
   // the state updates onClickKeyframe/onMoveKeyframe trigger, before the
@@ -177,9 +142,14 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
   // (2.5.8) minimum and still fits the 28px lane. Beat-strip lanes keep the
   // shrunken box: 24px there would reach up into the beat strip.
   const hitHeight = beatsActive ? diamondSize : 24;
-  const sorted = keyframesData.keyframes
-    .filter((kf) => kf.percentage >= KF_MIN_PCT && kf.percentage <= KF_MAX_PCT)
-    .sort((a, b) => a.percentage - b.percentage);
+  // Keyframes authored outside the element's visible clip window are parked at
+  // the boundary rather than hidden: dropping them made the lane's count
+  // disagree with its diamonds and left users unable to inspect or remove state
+  // that still affects the clip once it appears.
+  const sorted = [...keyframesData.keyframes].sort((a, b) => a.percentage - b.percentage);
+  const beforeClip = sorted.filter((keyframe) => keyframe.percentage < 0);
+  const afterClip = sorted.filter((keyframe) => keyframe.percentage > 100);
+  const boundaryStep = Math.max(6, Math.round(diamondSize * 0.55));
   // The neighbour clamp bounds a dragged diamond between its immediate siblings
   // so a retime can't reorder the tween. Siblings means "keyframes of the SAME
   // tween": a merged row interleaves several animations, and two of them
@@ -197,7 +167,7 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
   // O(keyframes squared) allocations on every playhead tick.
   const pendingClipPctOf = (keyframe: TimelineDiamondKeyframe) =>
     pendingRetimes.get(timelineKeyframeSelectionKey(elementId, keyframeTarget(keyframe)))
-      ?.clipPct ?? keyframe.percentage;
+      ?.clipPercentage ?? keyframe.percentage;
   const siblingRows = new Map<
     string | undefined,
     { keyframes: TimelineDiamondKeyframe[]; clipPcts: number[] }
@@ -212,16 +182,30 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
       clipPcts: row.map((s) => s.clipPct),
     });
   }
-  const centerXOf = (percentage: number) =>
-    Math.max(0, Math.min(clipWidthPx, (percentage / 100) * clipWidthPx));
+  const centerXOf = (keyframe: TimelineDiamondKeyframe, percentage = keyframe.percentage) => {
+    if (percentage < 0) {
+      const rank = beforeClip.indexOf(keyframe);
+      return -(beforeClip.length - Math.max(0, rank)) * boundaryStep;
+    }
+    if (percentage > 100) {
+      const rank = afterClip.indexOf(keyframe);
+      return clipWidthPx + (Math.max(0, rank) + 1) * boundaryStep;
+    }
+    return (percentage / 100) * clipWidthPx;
+  };
   // One record per diamond, carrying its own geometry, so the connector and
   // button passes below read neighbours as values instead of index lookups.
   const markers = sorted.map((keyframe, index) => {
-    const centerX = centerXOf(keyframe.percentage);
+    const centerX = centerXOf(keyframe);
+    // Parked diamonds sit on their own boundary spacing, so the in-clip
+    // neighbour-gap shrink would only make them unreadable.
+    if (keyframe.percentage < 0 || keyframe.percentage > 100) {
+      return { keyframe, centerX, hitWidth: diamondSize, visualSize: diamondSize };
+    }
     const previous = sorted[index - 1];
     const next = sorted[index + 1];
-    const previousGap = previous ? centerX - centerXOf(previous.percentage) : Infinity;
-    const nextGap = next ? centerXOf(next.percentage) - centerX : Infinity;
+    const previousGap = previous ? centerX - centerXOf(previous) : Infinity;
+    const nextGap = next ? centerXOf(next) - centerX : Infinity;
     const nearestGap = Math.max(1, Math.min(previousGap, nextGap));
     const hitWidth = Math.min(diamondSize, nearestGap);
     return {
@@ -247,6 +231,7 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
 
   return (
     <div
+      ref={rootRef}
       className="absolute inset-0"
       style={{
         // Above the clip's trim-handle strips (TimelineClip.tsx, z-index 4) so
@@ -262,6 +247,10 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
       <TimelineDiamondConnectors
         markers={markers}
         centerY={centerY}
+        elementId={elementId}
+        clipStart={clipStart}
+        clipDuration={clipDuration}
+        rovingTargetId={rovingTargetId}
         baseColor={baseColor}
         baseOpacity={baseOpacity}
         groupAware={groupAware}
@@ -273,7 +262,9 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
       {markers.map((marker, i) => {
         const kf = marker.keyframe;
         const target = keyframeTarget(kf);
+        const focusId = timelineKeyframeFocusId(elementId, target);
         const kfKey = timelineKeyframeSelectionKey(elementId, target);
+        const boundary = kf.percentage < 0 ? "before" : kf.percentage > 100 ? "after" : null;
         // Clamp against this keyframe's own tween, not the whole merged row.
         const siblingRow = siblingRows.get(kf.animationId);
         const siblingClipPcts = siblingRow?.clipPcts ?? [];
@@ -285,7 +276,7 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
         // The 0% diamond's left half lands in the reserved left gutter (the
         // content origin is inset past the label column, Figma-style) so it stays
         // fully visible instead of being clipped by the sticky label column.
-        const leftPx = (renderPct / 100) * clipWidthPx - marker.hitWidth / 2;
+        const leftPx = centerXOf(kf, renderPct) - marker.hitWidth / 2;
         const isKfSelected = selectedKeyframes.has(kfKey);
         const atPlayhead = kf === playheadKeyframe;
         const isHighlighted = isKfSelected || atPlayhead;
@@ -294,150 +285,43 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
         const onPointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
           if (e.button !== 0) return;
           e.stopPropagation();
-          if (canDrag) {
-            e.currentTarget.setPointerCapture?.(e.pointerId);
-            dragRef.current = {
-              kfKey,
-              startX: e.clientX,
-              lastX: e.clientX,
-              index: siblingIndex,
-              fromClipPct: pendingRetimes.get(kfKey)?.clipPct ?? kf.percentage,
-              moved: false,
-            };
-          }
-        };
-        const onPointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
-          const d = dragRef.current;
-          if (!d || d.kfKey !== kfKey || d.cancelled) return;
-          d.lastX = e.clientX;
-          if (!d.moved && Math.abs(e.clientX - d.startX) >= KEYFRAME_DRAG_THRESHOLD_PX) {
-            d.moved = true;
-          }
-          if (!d.moved || previewFrameRef.current !== null) return;
-          previewFrameRef.current = requestAnimationFrame(() => {
-            previewFrameRef.current = null;
-            const live = dragRef.current;
-            if (!live || live.kfKey !== kfKey || live.cancelled) return;
-            setPreview({
-              kfKey,
-              clipPct: previewClipPct({
-                pointerDownX: live.startX,
-                pointerMoveX: live.lastX,
-                clipWidthPx,
-                draggedClipPct: live.fromClipPct,
-                draggedIndex: live.index,
-                sortedClipPcts: siblingClipPcts,
-              }),
-            });
+          if (!canDrag) return;
+          retimeHandleRef.current = beginTimelineKeyframeRetime({
+            event: e,
+            elementId,
+            keyframeKey: kfKey,
+            target,
+            keyframes: keyframesData.keyframes,
+            clipWidthPx,
+            // Clamp against this keyframe's own tween, not the whole merged row:
+            // a merged row interleaves several animations, and two colliding at
+            // one percentage would otherwise pin each other's diamonds in place.
+            draggedIndex: siblingIndex,
+            sortedClipPercentages: siblingClipPcts,
+            keyframeKeyOf: (keyframe) =>
+              timelineKeyframeSelectionKey(elementId, keyframeTarget(keyframe)),
+            onMove: (fromTarget, toClipPercentage) =>
+              onMoveKeyframe?.(fromTarget, toClipPercentage) ?? Promise.resolve(false),
+            onSelect: (nextTarget, additive) => {
+              if (additive) onShiftClickKeyframe?.(nextTarget);
+              else onClickKeyframe?.(nextTarget);
+            },
+            suppressNextClick,
           });
         };
         const onPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
-          const d = dragRef.current;
-          if (d?.kfKey === kfKey && d.cancelled) {
-            // Escape already ended this drag; the release is not a click.
-            dragRef.current = null;
-            e.currentTarget.releasePointerCapture?.(e.pointerId);
-            suppressNextClick();
+          // The viewport coordinator owns an armed retime; this local path is
+          // only for diamonds that cannot be dragged.
+          if (canDrag) {
+            retimeHandleRef.current?.commit(e);
+            retimeHandleRef.current = null;
+            e.stopPropagation();
             return;
           }
-          // No drag armed (canDrag false / non-primary press) → treat as a click.
-          if (!d || d.kfKey !== kfKey) {
-            if (e.button !== 0) return;
-            suppressNextClick();
-            if (e.shiftKey) onShiftClickKeyframe?.(target);
-            else onClickKeyframe?.(target);
-            return;
-          }
-          e.stopPropagation();
-          dragRef.current = null;
-          cancelPreviewFrame();
-          setPreview(null);
-          e.currentTarget.releasePointerCapture?.(e.pointerId);
+          if (e.button !== 0) return;
           suppressNextClick();
-          // Single-diamond retime by design: a multi-select drag would have to
-          // move every selected keyframe as one mutation, which the script ops
-          // do not express yet. Selecting several and dragging one moves only
-          // the dragged one.
-          const res = resolveKeyframeDrag({
-            pointerDownX: d.startX,
-            pointerUpX: e.clientX,
-            clipWidthPx,
-            draggedClipPct: d.fromClipPct,
-            draggedIndex: siblingIndex,
-            sortedClipPcts: siblingClipPcts,
-          });
-          if (res.kind === "click" || res.kind === "noop") {
-            // "noop" is a press with enough pointer jitter to arm a drag (canDrag
-            // is on for every diamond once the clip is selected) that resolved
-            // back onto ~the same position — no real retime, so treat it as the
-            // click it was. Otherwise a normal click with a few px of mouse/
-            // trackpad drift silently does nothing: no selection, no move.
-            if (e.shiftKey) onShiftClickKeyframe?.(target);
-            else onClickKeyframe?.(target);
-          } else if (res.kind === "move" && res.toClipPct != null) {
-            const animKfs =
-              target.animationId === undefined
-                ? keyframesData.keyframes
-                : keyframesData.keyframes.filter((k) => k.animationId === target.animationId);
-            // Clamp to the mapped tween range: clipToTweenPercentage extrapolates
-            // linearly, so a boundary drag past the range would otherwise reselect
-            // an out-of-range tween % (e.g. 150%) even though the mutation clamps
-            // the moved endpoint back to the boundary.
-            const tweenPcts = animKfs
-              .map((k) => k.tweenPercentage)
-              .filter((v): v is number => typeof v === "number");
-            const clampTween = (v: number) =>
-              tweenPcts.length
-                ? Math.max(Math.min(...tweenPcts), Math.min(Math.max(...tweenPcts), v))
-                : v;
-            const newTweenPct = clampTween(clipToTweenPercentage(animKfs, res.toClipPct));
-            // For a rapid second retime the diamond still renders the stale cache
-            // position, so identify the FROM keyframe by the pending (already-moved)
-            // position; the mutation locates the source keyframe by this identity.
-            const pendingBefore = pendingRetimes.get(kfKey);
-            const fromTarget = pendingBefore
-              ? {
-                  ...target,
-                  percentage: pendingBefore.clipPct,
-                  tweenPercentage: pendingBefore.tweenPct,
-                }
-              : target;
-            const pending = { clipPct: res.toClipPct, tweenPct: newTweenPct };
-            pendingRetimes.set(kfKey, pending);
-            latestRetimeRef.current = pending;
-            const clearPending = () => {
-              if (pendingRetimes.get(kfKey) === pending) {
-                pendingRetimes.delete(kfKey);
-              }
-            };
-            // A rejected drop (the destination time is already occupied) snaps
-            // the diamond back to its source position, so the pending entry AND
-            // the selection have to revert with it — parking on the ghost drop
-            // position strands the playhead + selection on a keyframe that does
-            // not exist there.
-            const revertRetime = () => {
-              // Only the newest gesture owns the selection. A rejected first drag
-              // whose commit settles after a second one started would otherwise
-              // park the selection back on ITS source keyframe, undoing a retime
-              // the user has already made and moving the playhead with it.
-              const isLatest = latestRetimeRef.current === pending;
-              clearPending();
-              if (isLatest) onClickKeyframe?.(fromTarget);
-            };
-            void onMoveKeyframe?.(fromTarget, res.toClipPct).then((committed) => {
-              if (!committed) revertRetime();
-            }, revertRetime);
-            // A retime still targeted this exact diamond — park/select it at its
-            // new position, same as a plain click, or a drag that actually moved
-            // something looks identical to one that silently did nothing. Done
-            // optimistically so the gesture stays responsive; revertRetime puts
-            // it back if the move is rejected.
-            onClickKeyframe?.({
-              ...target,
-              percentage: res.toClipPct,
-              tweenPercentage: newTweenPct,
-            });
-          }
+          if (e.shiftKey) onShiftClickKeyframe?.(target);
+          else onClickKeyframe?.(target);
         };
 
         return (
@@ -449,6 +333,7 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
             key={`${kf.animationId ?? i}:${kf.propertyGroup ?? ""}:${kf.tweenPercentage ?? kf.percentage}`}
             type="button"
             className="absolute"
+            data-timeline-focus-id={focusId}
             data-keyframe-group={groupAware ? kf.propertyGroup : undefined}
             data-keyframe-percentage={
               groupAware ? (kf.tweenPercentage ?? kf.percentage) : undefined
@@ -456,6 +341,9 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
             data-keyframe-at-playhead={String(atPlayhead)}
             data-keyframe-selected={String(isKfSelected)}
             aria-current={atPlayhead ? "time" : undefined}
+            data-keyframe-outside-clip={boundary ?? undefined}
+            tabIndex={focusId === rovingTargetId ? 0 : -1}
+            aria-label={`${kf.propertyGroup ?? "Motion"} keyframe at ${keyframeTimeLabel(clipStart, clipDuration, kf.percentage)}${boundary ? ` (${boundary} clip)` : ""}`}
             aria-pressed={isKfSelected}
             style={{
               left: leftPx,
@@ -476,24 +364,31 @@ export const TimelineDiamondLane = memo(function TimelineDiamondLane({
               overflow: "visible",
             }}
             onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
+            onPointerMove={canDrag ? (e) => retimeHandleRef.current?.update(e) : undefined}
             onPointerUp={onPointerUp}
-            onPointerCancel={(e) => {
-              // Browser/OS cancellation (or lost capture) ends the drag without a
-              // pointerup, so clear the armed drag and preview or a ghost diamond
-              // stays stuck at the last previewed position.
-              if (dragRef.current?.kfKey !== kfKey) return;
-              dragRef.current = null;
-              cancelPreviewFrame();
-              setPreview(null);
-              e.currentTarget.releasePointerCapture?.(e.pointerId);
+            // Keyboard activation only (detail 0): pointer presses already
+            // resolve through the pointerup path above.
+            onClick={(e) => {
+              if (e.detail !== 0) return;
+              e.stopPropagation();
+              suppressNextClick();
+              if (e.shiftKey) onShiftClickKeyframe?.(target);
+              else onClickKeyframe?.(target);
             }}
+            onPointerCancel={
+              canDrag
+                ? (e) => {
+                    retimeHandleRef.current?.cancel(e);
+                    retimeHandleRef.current = null;
+                  }
+                : undefined
+            }
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
               onContextMenuKeyframe?.(e, target);
             }}
-            title={`${roundPct(kf.percentage)}%`}
+            title={`${roundPct(kf.percentage)}%${boundary ? ` · ${boundary} clip` : ""}`}
           >
             <svg
               width={marker.visualSize}

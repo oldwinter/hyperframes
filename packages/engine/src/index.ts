@@ -66,6 +66,7 @@ export {
   normalizeVp9CpuUsed,
 } from "./services/vp9Options.js";
 export {
+  getCgroupMemoryLimitMb,
   getSystemTotalMb,
   isLowMemorySystem,
   LOW_MEMORY_TOTAL_MB_THRESHOLD,
@@ -119,6 +120,7 @@ export {
   getCapturePerfSummary,
   percentileOf,
   prepareCaptureSessionForReuse,
+  deriveBeginFrameProbeTimeTicks,
   type CaptureSession,
   isTransientBrowserError,
   isMemoryExhaustionError,
@@ -179,6 +181,12 @@ export {
   parseImageElements,
   extractVideoFramesRange,
   extractAllVideoFrames,
+  resolveTimelineExtractionWindow,
+  resolveVideoExtractionWindow,
+  resolveFinalFrameExtractionWindow,
+  resolveVideoExtractionDuration,
+  resolvePlayableVideoDuration,
+  extractionFrameCountForDuration,
   resolveProjectRelativeSrc,
   getFrameAtTime,
   createFrameLookupTable,
@@ -194,6 +202,7 @@ export {
   type ExtractionOptions,
   type ExtractionResult,
   type ExtractionPhaseBreakdown,
+  type TimelineExtractionWindow,
   type VideoExtractionFailure,
   type VideoExtractionFailureKind,
   type VideoFrameFormat,
@@ -255,14 +264,28 @@ export { readWebGlVendorInfoFromCanvas } from "./utils/readWebGlVendorInfoFromCa
 export {
   extractMediaMetadata,
   extractVideoMetadata,
+  extractFinalVideoFrameTimestamp,
   extractAudioMetadata,
+  probeMediaProfile,
   analyzeKeyframeIntervals,
   type VideoMetadata,
   type AudioMetadata,
+  type MediaProbeProfile,
   type KeyframeAnalysis,
 } from "./utils/ffprobe.js";
 
-export { assertPublicHttpsUrl, downloadToTemp, isHttpUrl } from "./utils/urlDownloader.js";
+export {
+  assertPublicHttpsUrl,
+  downloadToTemp,
+  fetchPublicHttpsText,
+  isHttpUrl,
+  safeDownloadUrlIdentity,
+  writeUrlDownloadTelemetry,
+  type SafeDownloadUrlIdentity,
+  type UrlDownloadOptions,
+  type UrlDownloadTelemetry,
+  type PublicHttpsTextOptions,
+} from "./utils/urlDownloader.js";
 export {
   runFfmpeg,
   formatFfmpegError,
