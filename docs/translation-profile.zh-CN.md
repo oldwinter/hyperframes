@@ -6,19 +6,19 @@
 
 - 上游项目：`heygen-com/hyperframes`
 - 中文 fork：`oldwinter/hyperframes`
-- 当前同步上游 commit：`b08cefea6`（v0.7.101）
+- 当前同步上游 commit：`fecaf72d1f6d`（v0.7.109）
 - 上游许可：Apache-2.0
 - 主要安装面：skills CLI、Claude/Codex plugin、HyperFrames CLI
-- 中文 runtime 入口：`skills/` 下的 19 个 runtime skill
+- 中文 runtime 入口：`skills/` 下的 20 个 runtime skill
 
 ## 中文化目标
 
 HyperFrames 的 HTML、timing、seek-safe、render、媒体和 CLI 契约必须保持精确。每个 `skills/*/SKILL.md` 在英文正文前提供中文执行导读；代码、命令、参数、JSON/YAML key、CSS/HTML 标记、路径、注册表名称和验证阈值不翻译。上游英文正文、references 与产品文档继续作为权威技术契约。
 
-本批同步 v0.7.95 → v0.7.101（53 个上游 commit）：上游集中更新 Studio resize、
-preview/render parity、CLI publish retry、telemetry canary 和 parallel drawElement router。
-19 个 runtime skill 的 `SKILL.md` 未变，其中文导读保持有效；changelog 为
-v0.7.96–v0.7.101 各版本补充中文摘要。产品文档和 release 明细继续保留上游英文正文。
+本批同步 v0.7.101 → v0.7.109：上游新增 `hyperframes-audio` 混音 skill，并更新
+Studio resize、preview/render parity、CLI publish retry、telemetry canary、音频 carve
+和 composition assembly。新增 runtime 入口已补充中文执行导读；上游英文正文、references、
+changelog 和 release 明细继续作为权威技术契约保留。
 
 ## 安装与交付
 
@@ -35,4 +35,4 @@ codex plugin marketplace add oldwinter/hyperframes
 - `rg -n '^(<<<<<<<|=======|>>>>>>>)$' .`
 - JSON plugin manifest 校验
 - `bun run lint:skills` 或等价的 runtime skill 校验
-- 19 个 `skills/*/SKILL.md` 均包含中文导读，且 skill mirror/目录结构保持一致
+- 20 个 `skills/*/SKILL.md` 均包含中文导读，且 skill mirror/目录结构保持一致
