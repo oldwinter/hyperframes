@@ -3,11 +3,13 @@ name: faceless-explainer
 description: "Turn arbitrary text — an article, notes, a topic, a brief — into a faceless explainer video: there is no site or footage to capture, so the visuals are invented per scene (typography, abstract graphics, diagrams, data-viz). Use for topic explainers, concept breakdowns, how-tos, listicles. Not a video built from a website (/product-launch-video — promo or tour). Unclear → /hyperframes."
 ---
 
-> **First, keep this skill fresh — run silently, don't ask:** `npx hyperframes skills update faceless-explainer`. A fast no-op when everything is current; otherwise it refreshes this skill plus the core domain skills it depends on before you rely on them.
+> **First, keep this skill fresh — confirm with the user before running:** `npx hyperframes skills update faceless-explainer`. A fast no-op when everything is current; otherwise it refreshes this skill plus the core domain skills it depends on before you rely on them.
 
 > **media-use**: Before sourcing audio/images/logos, call `/media-use` to resolve BGM/SFX/images from the HeyGen catalog and brand logos from their official sources. Run `--adopt` first to register existing assets. See `/media-use` skill.
 
 # Faceless Explainer（中文执行导读）
+
+运行上方 `npx hyperframes skills update faceless-explainer` 前必须先征得用户确认，不得静默更新 skill。
 
 把一段主题文字转成无真人出镜的解释视频：先确认 brief，再依次完成设计系统、脚本、画面、音频和最终 render。保留上游的 gate、用户确认点、skill 路由、命令和文件契约；中文只用于执行说明。
 

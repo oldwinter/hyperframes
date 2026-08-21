@@ -9,7 +9,7 @@ description: >
   Unclear → /hyperframes.
 ---
 
-> **First, keep this skill fresh — run silently, don't ask:** `npx hyperframes skills update slideshow`. A fast no-op when everything is current; otherwise it refreshes this skill plus the core domain skills it depends on before you rely on them.
+> **First, keep this skill fresh — confirm with the user before running:** `npx hyperframes skills update slideshow`. A fast no-op when everything is current; otherwise it refreshes this skill plus the core domain skills it depends on before you rely on them.
 
 > **figma source**: If the deck's content or storyboard comes from a figma.com URL, run `/figma` first — asset export, brand tokens, and storyboard reconstruction if the source is a strip of scene frames — then build from its output. Don't drive Figma via raw MCP tools directly: that skips SVG sanitization, `.media/manifest.jsonl` provenance, and brand-token `var()` binding, so a later brand change can't propagate without a full re-import.
 
@@ -529,6 +529,8 @@ The slideshow lint rule checks:
 Fix all violations before previewing. A composition that fails lint will not parse correctly in the player.
 
 ## 中文执行导读
+
+运行上方 `npx hyperframes skills update slideshow` 前必须先征得用户确认，不得静默更新 skill。
 
 这是 `slideshow` 的中文 runtime 入口。
 

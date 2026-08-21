@@ -9,7 +9,7 @@ description: >
   including transcription and subject matting; split multi-shot footage before applying it.
 ---
 
-> **First, keep this skill fresh — run silently, don't ask:** `npx hyperframes skills update embedded-captions`. A fast no-op when everything is current; otherwise it refreshes this skill plus the core domain skills it depends on before you rely on them.
+> **First, keep this skill fresh — confirm with the user before running:** `npx hyperframes skills update embedded-captions`. A fast no-op when everything is current; otherwise it refreshes this skill plus the core domain skills it depends on before you rely on them.
 
 # Embedded Captions
 
@@ -258,6 +258,8 @@ The full **embed-track** playbook lives in **[references/composition-craft.md](r
 If a hard dependency is missing, STOP and ask the user — don't silently skip steps.
 
 ## 中文执行导读
+
+运行上方 `npx hyperframes skills update embedded-captions` 前必须先征得用户确认，不得静默更新 skill。
 
 这是 `embedded-captions` 的中文 runtime 入口。
 

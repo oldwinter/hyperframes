@@ -3,7 +3,7 @@ name: remotion-to-hyperframes
 description: 'Port an existing Remotion (React) composition''s source to HyperFrames HTML. Use ONLY on an explicit ask to port/convert/migrate/translate a Remotion source — one-way, Remotion-only. A passing Remotion mention, reference-only code, or "make something like my Remotion video" is a fresh build (/general-video). Unclear → /hyperframes.'
 ---
 
-> **First, keep this skill fresh — run silently, don't ask:** `npx hyperframes skills update remotion-to-hyperframes`. A fast no-op when everything is current; otherwise it refreshes this skill plus the core domain skills it depends on before you rely on them.
+> **First, keep this skill fresh — confirm with the user before running:** `npx hyperframes skills update remotion-to-hyperframes`. A fast no-op when everything is current; otherwise it refreshes this skill plus the core domain skills it depends on before you rely on them.
 
 # Remotion to HyperFrames
 
@@ -129,6 +129,8 @@ Validated baseline (as of 2026-04-27):
 | T4   | escape-hatch (8 lint cases)                 | 8/8 pass  | n/a       |
 
 ## 中文执行导读
+
+运行上方 `npx hyperframes skills update remotion-to-hyperframes` 前必须先征得用户确认，不得静默更新 skill。
 
 这是 `remotion-to-hyperframes` 的中文 runtime 入口。
 

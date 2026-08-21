@@ -9,6 +9,55 @@ Recent HyperFrames releases, including user-facing features, fixes, and migratio
 {/* New release entries are prepended by `bun run changelog:draft <version> --write`. */}
 
 <Update
+  label="HyperFrames v0.8.6"
+  description="Released - 2026-08-21"
+  tags={["Release", "Audio", "Core", "Skills", "Lint"]}
+>
+Audio now replays reliably after backward seeks, and rendered mixes keep every clip at its authored time.
+Studio keeps nested timelines open, skill updates require confirmation, and a brittle lint error is gone.
+
+## Fixes
+
+- **Audio:** Keep delayed clips at their authored times in rendered mixes, preventing late clips from jumping to the start or disappearing ([c056289d8](https://github.com/heygen-com/hyperframes/commit/c056289d832351dc35256bda8b36188a77bc557a), [#3380](https://github.com/heygen-com/hyperframes/pull/3380)).
+- **Core:** Replay ended audio after backward timeline seeks without repeating tails during ordinary playback ([477e09642](https://github.com/heygen-com/hyperframes/commit/477e09642b6db735866316301d924d0dfdc3cf38), [#3383](https://github.com/heygen-com/hyperframes/pull/3383)).
+- **Skills:** Ask for confirmation before updating installed skills ([efc2e1964](https://github.com/heygen-com/hyperframes/commit/efc2e1964a1c837f748a1c319896998a0e9da211), [#3295](https://github.com/heygen-com/hyperframes/pull/3295)).
+- **Studio:** Keep subcomposition timelines open during playback ([a340ed382](https://github.com/heygen-com/hyperframes/commit/a340ed382aa5d335a3b7e40b6cfb4dfae1870569), [#3382](https://github.com/heygen-com/hyperframes/pull/3382)).
+- **Lint:** Remove the fragile `head_leaked_text` rule that could block correct compositions ([a89780679](https://github.com/heygen-com/hyperframes/commit/a8978067981805bdae72b8f16ca1c57153ec207a), [#3385](https://github.com/heygen-com/hyperframes/pull/3385)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.5...v0.8.6).
+</Update>
+
+<Update
+  label="HyperFrames v0.8.5"
+  description="Released - 2026-08-20"
+  tags={["Release", "Studio", "Lint", "Telemetry"]}
+>
+Lint is quieter and more accurate. Seven rules that fired on correct compositions are gone, so you waste fewer edits chasing errors that were never real.
+The clip example in the docs also stopped failing its own linter.
+
+## Features
+
+- **Telemetry:** Measure which lint rules fire, cost, and fail to converge ([f822200fb8](https://github.com/heygen-com/hyperframes/commit/f822200fb8f437b73985f43837c195f5e7312289), [#3367](https://github.com/heygen-com/hyperframes/pull/3367)).
+- **Skills:** Anchored-connector rule + source-traceable visuals doctrine ([a6a9e2f89e](https://github.com/heygen-com/hyperframes/commit/a6a9e2f89e509424a64a1dcd976aabfd54b60d02), [#3354](https://github.com/heygen-com/hyperframes/pull/3354)).
+
+## Fixes
+
+- **Studio:** Capture storyboard tiles at review density ([b4d5abd7b2](https://github.com/heygen-com/hyperframes/commit/b4d5abd7b2cdc419906153ca75d99bd813adf614), [#3371](https://github.com/heygen-com/hyperframes/pull/3371)).
+- **Lint:** Stop erroring on the documented canonical clip block ([2be5a03b80](https://github.com/heygen-com/hyperframes/commit/2be5a03b800e0b17ee36e99167c99edc383065ce), [#3374](https://github.com/heygen-com/hyperframes/pull/3374)).
+- **Skills:** Resolve the blueprint id from a qualified `blueprint:` field ([d1482b0129](https://github.com/heygen-com/hyperframes/commit/d1482b012926d7118fa39e53ef8974328e84cc9e), [#3337](https://github.com/heygen-com/hyperframes/pull/3337)).
+- **Skills:** Stage SVGs that capture wrote into capture/assets/svgs/ ([c66c9a4c76](https://github.com/heygen-com/hyperframes/commit/c66c9a4c76ff0681cadc8007a8e02744bbcdab10), [#3336](https://github.com/heygen-com/hyperframes/pull/3336)).
+- **Core:** Keep authored gain above unity off el.volume in the sandbox bridge ([9140c0eaa1](https://github.com/heygen-com/hyperframes/commit/9140c0eaa1b332de7ca061af040611f5b1c64419), [#3349](https://github.com/heygen-com/hyperframes/pull/3349)).
+- **Producer:** Seek once per step when discovering video visibility ([d09145faab](https://github.com/heygen-com/hyperframes/commit/d09145faabfd3078c29969fbcf293067d50275ac), [#3233](https://github.com/heygen-com/hyperframes/pull/3233)).
+- **Studio:** Capture the storyboard frame hero at full resolution ([f0e637375f](https://github.com/heygen-com/hyperframes/commit/f0e637375f2c43b22192f1ad8c3aef1b5d010e8a), [#3338](https://github.com/heygen-com/hyperframes/pull/3338)).
+
+## Internal
+
+- **Lint:** Drop seven rules that fire on correct compositions ([83ceaeb902](https://github.com/heygen-com/hyperframes/commit/83ceaeb902f07ffc4bed976ca3bdd501eb60aa55), [#3366](https://github.com/heygen-com/hyperframes/pull/3366)).
+
+[View the full commit range](https://github.com/heygen-com/hyperframes/compare/v0.8.4...v0.8.5).
+</Update>
+
+<Update
   label="HyperFrames v0.8.4"
   description="Released - 2026-08-19"
   tags={["Release", "CLI", "Studio", "Producer"]}
