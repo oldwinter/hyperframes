@@ -18,6 +18,8 @@ description: >
 
 执行前先读取 `references/attributes.md`、`references/fx-registry.md`、`references/diagnosis.md`；准备手写 chain 前先查 `references/presets.md`。保持 `data-fx-chain`、`data-automation`、`data-fx-carve` 的 JSON 结构、参数范围、单位和 preview/render parity 不变。先确认两个 authoring surface 写入相同属性，再用 preview 验证，最后执行 render；不要为 preview 和 render 各调一套效果。
 
+为多个 voice clip 做 carve 时，必须先用同一个 `data-audio-group` 把它们归入纯 voiceover 分组，再让 `data-fx-carve.sources` 引用 group id；不要逐个列出多个 clip id。该分组不能混入 bed、SFX 或 music，也不能包含被 carve 的 bed 本身，否则后续重新分析会把错误成员纳入 sidechain。`audio_carve_ungrouped_sources` lint 会标出仍在逐个引用多个 clip 的写法。
+
 # HyperFrames Audio
 
 A mix is a set of relationships, not a stack of processors. Two tracks that each
@@ -241,6 +243,59 @@ are summed onto the bed's own clock before anything is measured (`mixCarveSource
 so one analysis covers all of them: the bands come from all the speech there is, and
 the envelopes rise wherever any of it is happening. Voices that never play while the
 bed does are left out; they cannot mask it.
+
+**A carve against more than one clip id is wrong. Group the clips and carve
+against the group.** This is an invariant, not a tip. Naming clips one by one has
+to be exhaustively right and stays right only until the next edit — a fourth
+narration clip added later plays outside the carve's awareness, and the bed
+fails to duck under it silently. Naming the group instead resolves membership at
+analysis time, so a clip added to the group later is covered without touching
+`sources` at all:
+
+```html
+<!-- group the narration, then carve the bed against the group -->
+<audio id="vo-intro" data-audio-group="voiceover" …></audio>
+<audio id="vo-middle" data-audio-group="voiceover" …></audio>
+<audio id="vo-outro" data-audio-group="voiceover" …></audio>
+
+<audio
+  id="music"
+  data-fx-carve='{"enabled":true,"sources":["voiceover"],"strength":0.25}'
+  …
+></audio>
+```
+
+A `sources` list naming two or more plain clip ids instead of a group is caught
+by the `audio_carve_ungrouped_sources` lint rule — it still works, but it is the
+version that silently rots when a clip is added.
+
+**Keep the carve group a voice group: no bed, no SFX, no music.** A group id in
+`sources` resolves to every _current_ member on _every_ analysis, so the group
+you name is the group you get later — not the tracks that were measured when it
+was written. Two ways that bites:
+
+- **The bed in its own source group.** It is handed to itself as a voice and
+  carved against its own content — the "never carve a track against itself" rule
+  arriving one re-analysis later.
+- **An SFX or music clip in the voice group.** It enters the sidechain on the
+  next analysis and the bed starts ducking under a whoosh, even though the run
+  that wrote the attribute never measured it.
+
+Both are invisible at the moment the carve is written: the analysis sums the
+voices it detected and never round-trips through group resolution, so the first
+pass is genuinely correct and only the next one is wrong. So give each role its
+own group — `music` for the bed, `voiceover` for the narration, `sfx` for the
+hits — and keep the group named in `sources` holding nothing but voices.
+
+`carve.mjs` refuses to write the group form when it sees either case, records
+clip ids, and says on stderr which member blocked it. The
+`audio_carve_ungrouped_sources` rule then points at the arrangement instead of
+the CLI quietly persisting a wider carve than it measured.
+
+A voice that this run left out is **not** one of these cases and does not block
+the group form: `carve.mjs` only analyses voices that overlap the bed, and
+picking up a clip that plays later without an edit to `sources` is the whole
+reason to name the group.
 
 **One knob.** `strength` is 0..1 and derives everything: how deep to cut, how
 many bands, how wide, how far to favour intelligibility over raw voice energy,

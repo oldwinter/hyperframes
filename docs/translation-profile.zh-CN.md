@@ -6,7 +6,7 @@
 
 - 上游项目：`heygen-com/hyperframes`
 - 中文 fork：`oldwinter/hyperframes`
-- 当前同步上游 commit：`1b86b5612`（v0.8.6）
+- 当前同步上游 commit：`dd0626a55a0d0f24cae1b00bd2c95c0ebfa7a573`（v0.8.10）
 - 上游许可：Apache-2.0
 - 主要安装面：skills CLI、Claude/Codex plugin、HyperFrames CLI
 - 中文 runtime 入口：`skills/` 下的 20 个 runtime skill
@@ -15,15 +15,15 @@
 
 HyperFrames 的 HTML、timing、seek-safe、render、媒体和 CLI 契约必须保持精确。每个 `skills/*/SKILL.md` 在英文正文前提供中文执行导读；代码、命令、参数、JSON/YAML key、CSS/HTML 标记、路径、注册表名称和验证阈值不翻译。上游英文正文、references 与产品文档继续作为权威技术契约。
 
-本批同步 v0.8.4 到 v0.8.6：吸收上游音频 FX、Studio、render、CLI、lint、telemetry、
-脚本和测试更新；skill 自更新现在必须先征得用户确认，timed element 的 visibility 由
-`data-start` / `data-duration` 驱动，`.clip` 继续作为 Studio、GSAP ownership 和 linter
-识别标记。上游英文正文、references、changelog 和 release 明细继续作为权威技术契约保留。
+本批同步 v0.8.7 到 v0.8.10：吸收上游音频分组、group bus、mute/solo、FX rack、
+automation、voiceover carve、Studio timeline、render、CLI、lint 和可靠性更新。多个 voice
+clip 必须先归入纯 voiceover group，再由 carve 引用 group id；新增中文执行导读明确了
+这一约束。上游英文正文、references、changelog 和 release 明细继续作为权威技术契约保留。
 
 ## 安装与交付
 
 ```bash
-npx skills add oldwinter/hyperframes --full-depth
+npx skills add oldwinter/hyperframes
 codex plugin marketplace add oldwinter/hyperframes
 ```
 

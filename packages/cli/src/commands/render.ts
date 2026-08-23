@@ -5,9 +5,9 @@ import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, rmSync
 import { createRenderPlan, resolveBrowserGpuForCli, type RenderFormat } from "./render/plan.js";
 import { seedProjectAuthoringSkill } from "../utils/projectConfig.js";
 import { presentRenderPlan } from "./render/present.js";
-import { executeRenderPlan, renderLintContinuationHint } from "./render/execute.js";
+import { executeRenderPlan, renderLintContinuationHint, runRenderLint } from "./render/execute.js";
 // Test-only seams retained at the command boundary for render behavior tests.
-export { resolveBrowserGpuForCli, renderLintContinuationHint };
+export { resolveBrowserGpuForCli, renderLintContinuationHint, runRenderLint };
 
 export const examples: Example[] = [
   ["Render to MP4", "hyperframes render --output output.mp4"],
@@ -902,12 +902,15 @@ export async function renderLocal(
     await producer.executeRenderJob(job, projectDir, outputPath, onProgress);
   } catch (error: unknown) {
     maybeConsumeDeParallelRouterTrial(deParallelRouterActive, job, options.quiet);
+    // The render container sets `ENV CONTAINER=true`; suggesting `--docker`
+    // from inside it is a misdirection (heygen-com/hyperframes#3370).
+    const inContainer = process.env.CONTAINER === "true";
     handleRenderError(
       error,
       options,
       startTime,
       false,
-      "Try --docker for containerized rendering",
+      inContainer ? "" : "Try --docker for containerized rendering",
       job.failedStage,
       job,
     );
