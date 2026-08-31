@@ -68,6 +68,7 @@ function tmpProject(): string {
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  vi.useRealTimers();
   vi.resetModules();
   vi.doUnmock("node:child_process");
   vi.doUnmock("@hyperframes/parsers/ff-binaries");
@@ -99,6 +100,7 @@ async function loadModule(
 
 describe("resolveProxy", () => {
   it("bounds a caller wait without cancelling the shared transcode promise", async () => {
+    vi.useFakeTimers();
     const { waitForProxy, ProxyWaitTimeoutError } = await loadModule(
       () => createFakeProc(),
       FFMPEG_PATH,
@@ -108,7 +110,10 @@ describe("resolveProxy", () => {
       finish = resolvePromise;
     });
 
-    await expect(waitForProxy(shared, 1)).rejects.toBeInstanceOf(ProxyWaitTimeoutError);
+    const wait = waitForProxy(shared, 1);
+    const rejection = expect(wait).rejects.toBeInstanceOf(ProxyWaitTimeoutError);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejection;
     finish("eventual-proxy.mp4");
     await expect(shared).resolves.toBe("eventual-proxy.mp4");
   });

@@ -165,10 +165,10 @@ describe("resolveDroppedAssetDimensions", () => {
       naturalWidth: 0,
       src: "",
     };
-    vi.stubGlobal(
-      "Image",
-      vi.fn(() => probe),
-    );
+    function MockImage() {
+      return probe;
+    }
+    vi.stubGlobal("Image", MockImage);
 
     const result = resolveDroppedAssetDimensions("demo", "assets/hung.png", "image");
     await vi.advanceTimersByTimeAsync(3000);

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hasMediaSyncStateForTest, syncRuntimeMedia } from "./media";
 import {
   deriveCodecMapKey,
@@ -16,6 +16,10 @@ vi.mock("./bridge", () => ({
 import { postRuntimeMessage } from "./bridge";
 
 const postRuntimeMessageMock = vi.mocked(postRuntimeMessage);
+
+beforeEach(() => {
+  postRuntimeMessageMock.mockClear();
+});
 
 const HEVC_ENTRY: MediaCodecMapEntry = {
   codecName: "hevc",

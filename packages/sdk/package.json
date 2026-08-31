@@ -46,7 +46,8 @@
     }
   },
   "publishConfig": {
-    "access": "public",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
     "exports": {
       ".": {
         "import": "./dist/index.js",
@@ -73,8 +74,7 @@
         "types": "./dist/editing/affordances.d.ts"
       }
     },
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts"
+    "access": "public"
   },
   "scripts": {
     "build": "tsc",
@@ -86,12 +86,12 @@
   "dependencies": {
     "@hyperframes/core": "workspace:*",
     "@hyperframes/parsers": "workspace:*",
-    "linkedom": "^0.18.12"
+    "linkedom": "^0.18.13"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
-    "happy-dom": "^20.9.0",
-    "typescript": "^5.0.0",
+    "happy-dom": "^20.12.0",
+    "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   }
 }

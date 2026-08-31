@@ -114,7 +114,8 @@
     }
   },
   "publishConfig": {
-    "access": "public",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
     "exports": {
       ".": {
         "import": "./dist/index.js",
@@ -182,8 +183,7 @@
         "types": "./dist/assetResolution.d.ts"
       }
     },
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts"
+    "access": "public"
   },
   "scripts": {
     "build": "tsup",
@@ -193,19 +193,19 @@
     "prepublishOnly": "echo skip"
   },
   "dependencies": {
-    "@babel/parser": "^7.27.0",
-    "acorn": "^8.17.0",
+    "@babel/parser": "^8.0.4",
+    "acorn": "^8.18.0",
     "acorn-walk": "^8.3.5",
-    "linkedom": "^0.18.12",
-    "magic-string": "^0.30.21",
-    "recast": "^0.23.11"
+    "linkedom": "^0.18.13",
+    "magic-string": "^1.2.3",
+    "recast": "^0.24.0"
   },
   "devDependencies": {
     "@hyperframes/core": "workspace:*",
     "@types/node": "^25.0.10",
-    "tsup": "^8.0.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.0.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   }
 }
