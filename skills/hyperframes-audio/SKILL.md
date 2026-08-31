@@ -5,8 +5,9 @@ description: >
   fade-in/fade-out, crossfade, track gain or volume, volume automation, ducking,
   a music bed that fights a voiceover (voiceover carve), effects on a track
   (EQ, compressor, limiter, gate, saturation, delay, reverb, chorus, phaser,
-  bitcrush), or automation envelopes drawn on a track's volume or any effect
-  parameter.
+  bitcrush), automation envelopes drawn on a track's volume or any effect
+  parameter, or one submix bus carrying a chain, a fader and an automation clock
+  for several tracks at once (`<hf-audio-group>`).
   Don't use for sourcing or generating audio — finding BGM, SFX, or making a
   voiceover is `/media-use`. Don't use for clip timing or track layout, which is
   `/hyperframes-core`.
@@ -14,11 +15,13 @@ description: >
 
 ## 中文执行导读
 
-当已有音频需要在 HyperFrames composition 中做混音时使用：例如给 voiceover 让出频段、为轨道添加 EQ / compressor / limiter / gate / saturation / delay / reverb / chorus / phaser / bitcrush，或绘制音量与效果参数的 automation。不要用它寻找或生成音频，也不要用它处理 clip timing 或 track layout；分别路由到 `/media-use` 和 `/hyperframes-core`。
+当已有音频需要在 HyperFrames composition 中做混音时使用：例如给 voiceover 让出频段、为轨道添加 EQ / compressor / limiter / gate / saturation / delay / reverb / chorus / phaser / bitcrush，绘制音量与效果参数的 automation，或让多个轨道共享一个 submix bus。不要用它寻找或生成音频，也不要用它处理 clip timing 或 track layout；分别路由到 `/media-use` 和 `/hyperframes-core`。
 
 执行前先读取 `references/attributes.md`、`references/fx-registry.md`、`references/diagnosis.md`；准备手写 chain 前先查 `references/presets.md`。保持 `data-fx-chain`、`data-automation`、`data-fx-carve` 的 JSON 结构、参数范围、单位和 preview/render parity 不变。先确认两个 authoring surface 写入相同属性，再用 preview 验证，最后执行 render；不要为 preview 和 render 各调一套效果。
 
 为多个 voice clip 做 carve 时，必须先用同一个 `data-audio-group` 把它们归入纯 voiceover 分组，再让 `data-fx-carve.sources` 引用 group id；不要逐个列出多个 clip id。该分组不能混入 bed、SFX 或 music，也不能包含被 carve 的 bed 本身，否则后续重新分析会把错误成员纳入 sidechain。`audio_carve_ungrouped_sources` lint 会标出仍在逐个引用多个 clip 的写法。
+
+当多个轨道需要同一套处理时，使用 `<hf-audio-group>` submix bus，把 `data-fx-chain`、`data-automation` 和 `data-volume` 放在 bus 上；bus 的 automation 使用 composition time，且不带 `data-start`。`data-fx-carve` 仍必须写在被 carve 的 bed clip 上，并通过 `sources` 指向纯 voiceover group；不要把 carve 写到 bus 上。单成员 bus 只在确实需要 composition-time automation 时使用。
 
 # HyperFrames Audio
 
@@ -46,7 +49,8 @@ no rate envelope; preprocess a derived synchronized asset. HyperFrames does not
 provide automatic waveform sync or drift correction.
 For copyable cut/crossfade/retime recipes, use `/hyperframes-core` → `references/creator-editing-recipes.md`.
 
-Three attributes carry everything, all on the audio/video element itself:
+Three attributes carry everything, on the audio/video element itself — or, for
+the first two, on an `<hf-audio-group>` bus (see "One bus for many tracks"):
 
 | Attribute         | Holds                                                     |
 | ----------------- | --------------------------------------------------------- |
@@ -296,6 +300,65 @@ A voice that this run left out is **not** one of these cases and does not block
 the group form: `carve.mjs` only analyses voices that overlap the bed, and
 picking up a clip that plays later without an edit to `sources` is the whole
 reason to name the group.
+
+### One bus for many tracks
+
+Membership alone is enough to carve against, as above — but add an
+`<hf-audio-group>` element with that id and the group becomes a real submix bus:
+one chain, one fader, one automation clock for every member.
+
+```html
+<hf-audio-group
+  id="voiceover"
+  data-label="Voiceover"
+  data-volume="0.9"
+  data-fx-chain='{"version":1,"nodes":[
+    {"type":"compressor","id":"g1","params":{"threshold":-18,"ratio":3}},
+    {"type":"peaking","id":"g2","params":{"frequency":3000,"gain":2,"q":1}}]}'
+></hf-audio-group>
+
+<audio id="vo-intro" data-audio-group="voiceover" …></audio>
+<audio id="vo-middle" data-audio-group="voiceover" …></audio>
+```
+
+**Reach for the bus when the same treatment belongs on several tracks.** Four
+narration clips that each want the same compressor is four chains to keep in
+step, and they drift the moment one is edited; on the bus it is one chain, and
+the compressor sees the whole voice rather than each clip in isolation — which is
+the point, since a compressor cannot ride a sequence it only hears a third of.
+Per-clip chains remain right for what is genuinely per-clip: one noisy take that
+needs its own de-esser.
+
+| On the bus        | Does                                      |
+| ----------------- | ----------------------------------------- |
+| `data-fx-chain`   | one chain over the summed members         |
+| `data-automation` | envelopes on the bus, in COMPOSITION time |
+| `data-volume`     | one fader for every member (default 1)    |
+| `data-label`      | the display name; falls back to the id    |
+| `data-hidden`     | drops every member from the mix           |
+
+**Group automation is composition time, not clip time.** A bus has no
+`data-start` — members are already at their composition positions when they
+reach it — so `t: 0` in a group lane is the start of the composition, not of any
+clip. A lane on a clip is clip-local; the same numbers mean different instants on
+the two, which is the one thing to get right when moving an envelope from a clip
+up onto its bus.
+
+**A carve stays on the clip.** `data-fx-carve` is not a group attribute. The bed
+being carved is a single track, and it is that track which carries
+`data-fx-carve` — pointed AT a group, per the rule above. Group and carve meet in
+`sources`, not on one element. A carve written onto a bus is half an effect
+applied twice: the level half measures the bed's own audio, which a bus has none
+of, so only the filters survive — and a bus and its members are one signal path,
+so the bed then runs through the bus's filters AND its own. The
+`audio_group_carve_attr` lint rule catches it.
+
+**One clip is not a bus.** A group exists to give several tracks one chain, one
+fader and one clock. Wrapping a single clip in a bus buys nothing the clip's own
+`data-fx-chain` does not already do, and it doubles the places a later edit has
+to land. The one reason to do it anyway: a bus's automation clock is composition
+time, so a single-member bus is how a lane on that clip gets composition-time
+timing.
 
 **One knob.** `strength` is 0..1 and derives everything: how deep to cut, how
 many bands, how wide, how far to favour intelligibility over raw voice energy,
