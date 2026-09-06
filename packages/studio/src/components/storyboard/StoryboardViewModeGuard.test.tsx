@@ -115,12 +115,19 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = "";
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
+function stubConfirm(result: boolean) {
+  const confirm = vi.fn(() => result);
+  vi.stubGlobal("confirm", confirm);
+  return confirm;
+}
+
 describe("dirty storyboard voiceover view-mode guard", () => {
   it("guards the header Preview transition on decline and allows it on accept", () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const confirm = stubConfirm(false);
     const { host, root } = renderApp();
     makeVoiceoverDirty(host);
 
@@ -136,7 +143,7 @@ describe("dirty storyboard voiceover view-mode guard", () => {
   });
 
   it("guards Open in Preview on decline and selects the frame only after accept", () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const confirm = stubConfirm(false);
     const { host, root } = renderApp();
     makeVoiceoverDirty(host);
 
@@ -152,7 +159,7 @@ describe("dirty storyboard voiceover view-mode guard", () => {
   });
 
   it("guards browser history transitions on decline and allows them on accept", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const confirm = stubConfirm(false);
     const { host, root } = renderApp();
     makeVoiceoverDirty(host);
 

@@ -11,6 +11,7 @@ import { ExternalFileConflictBanner } from "./ExternalFileConflictBanner";
 describe("ExternalFileConflictBanner", () => {
   afterEach(() => {
     document.body.replaceChildren();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -107,7 +108,10 @@ describe("ExternalFileConflictBanner", () => {
       button.textContent?.includes("Overwrite file with recovered Studio draft"),
     );
     expect(overwrite).toBeTruthy();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.stubGlobal(
+      "confirm",
+      vi.fn(() => true),
+    );
     await act(async () => overwrite?.click());
     expect(keepStudioFile).toHaveBeenCalledOnce();
 
