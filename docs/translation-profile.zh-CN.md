@@ -25,7 +25,7 @@ block。多个 voice clip 必须先归入纯 voiceover group，再由 carve 引�
 ## 安装与交付
 
 ```bash
-npx skills add oldwinter/hyperframes
+npx skills add oldwinter/hyperframes --full-depth
 codex plugin marketplace add oldwinter/hyperframes
 ```
 
