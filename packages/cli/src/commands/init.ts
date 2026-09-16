@@ -836,6 +836,11 @@ export default defineCommand({
 
       if (existsSync(destDir) && readdirSync(destDir).length > 0) {
         console.error(c.error(`Directory already exists and is not empty: ${name}`));
+        console.error(
+          c.dim(
+            `Pick a different name, or preview this project: ${c.accent(`cd ${name} && hyperframes play`)}`,
+          ),
+        );
         failCommand();
       }
 

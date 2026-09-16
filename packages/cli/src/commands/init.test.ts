@@ -69,6 +69,24 @@ describe("hyperframes init flag rename", () => {
     }
   });
 
+  it("tells non-interactive init to rename or play when the directory already exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "hf-init-test-"));
+    const target = join(dir, "proj");
+    try {
+      mkdirSync(target);
+      writeFileSync(join(target, "keep.txt"), "x");
+      const res = runInit([target, "--example", "blank", "--non-interactive"]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain(`Directory already exists and is not empty: ${target}`);
+      expect(res.stderr).toContain("Pick a different name");
+      expect(res.stderr).toContain(`cd ${target} && hyperframes play`);
+      expect(readFileSync(join(target, "keep.txt"), "utf-8")).toBe("x");
+      expect(existsSync(join(target, "index.html"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a following flag when --example has no value", () => {
     const dir = mkdtempSync(join(tmpdir(), "hf-init-test-"));
     const target = join(dir, "proj");
