@@ -1,6 +1,7 @@
 import { failCommand } from "../utils/commandResult.js";
 import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
+import { unknownTopicNextSteps } from "./docsUnknownTopic.js";
 import { readFileSync, existsSync } from "node:fs";
 
 export const examples: Example[] = [
@@ -94,6 +95,7 @@ function renderMarkdown(content: string): void {
 }
 
 const TOPIC_NAMES = Object.keys(TOPICS).join(", ");
+const FIRST_TOPIC = Object.keys(TOPICS)[0];
 
 export default defineCommand({
   meta: { name: "docs", description: "View inline documentation in the terminal" },
@@ -122,12 +124,12 @@ export default defineCommand({
     // Look up the topic
     const entry = TOPICS[topic];
     if (entry === undefined) {
-      console.error(c.error(`Unknown topic: ${topic}`));
-      console.error();
-      console.error("Available topics:");
-      for (const name of Object.keys(TOPICS)) {
-        console.error(`  ${c.accent(name)}`);
+      const next = unknownTopicNextSteps(topic, FIRST_TOPIC);
+      console.error(c.error(next.unknown));
+      if (next.tryCmd !== undefined) {
+        console.error(c.dim(next.tryCmd));
       }
+      console.error(c.dim(next.listCmd));
       failCommand();
     }
 
