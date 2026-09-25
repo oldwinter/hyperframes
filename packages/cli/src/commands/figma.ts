@@ -8,7 +8,9 @@
 
 import { defineCommand } from "citty";
 import type { Example } from "./_examples.js";
+import { failUsage } from "../utils/commandResult.js";
 import { c } from "../ui/colors.js";
+import { missingFigmaSubcommand } from "./figmaMissingSubcommand.js";
 
 export const examples: Example[] = [
   [
@@ -53,6 +55,9 @@ export default defineCommand({
     component: () => import("./figma/component.js").then((m) => m.default),
   },
   async run({ args }) {
-    if (!args._?.[0]) console.log(HELP);
+    if (!args._?.[0]) {
+      console.log(HELP);
+      failUsage(missingFigmaSubcommand().exitCode);
+    }
   },
 });
