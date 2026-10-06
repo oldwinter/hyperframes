@@ -1,6 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  closeSync,
+  fstatSync,
+  ftruncateSync,
+  futimesSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { affectsProjectSignature } from "./projectSignature.js";
+import {
+  affectsProjectSignature,
+  createProjectSignature,
+  listProjectFiles,
+} from "./projectSignature.js";
+
+const temporaryProjects: string[] = [];
+
+afterEach(() => {
+  for (const project of temporaryProjects.splice(0)) rmSync(project, { recursive: true });
+});
 
 const PROJECT = resolve("/projects/demo");
 const affects = (relativePath: string) =>
@@ -37,8 +59,50 @@ describe("affectsProjectSignature", () => {
     expect(affects(".hyperframes/cache/blob.bin")).toBe(false);
   });
 
+  it("rejects the temp file of a save in flight, but not a user's own .tmp file", () => {
+    expect(affects("index.html.hf0a1b2c.tmp")).toBe(false);
+    expect(affects("foo.12345678.tmp")).toBe(true);
+  });
+
   it("rejects a path outside the project", () => {
     expect(affectsProjectSignature(PROJECT, resolve("/projects/other/index.html"))).toBe(false);
     expect(affectsProjectSignature(PROJECT, PROJECT)).toBe(false);
+  });
+});
+
+describe("listProjectFiles", () => {
+  it("leaves out the temp file of a save in flight", () => {
+    const project = mkdtempSync(resolve(tmpdir(), "hf-signature-"));
+    temporaryProjects.push(project);
+    writeFileSync(resolve(project, "index.html"), "<h1>Hello</h1>");
+    writeFileSync(resolve(project, "index.html.hf0a1b2c.tmp"), "<h1>Bye</h1>");
+    writeFileSync(resolve(project, "foo.12345678.tmp"), "mine");
+
+    expect(listProjectFiles(project).map((file) => file.path)).toEqual([
+      "foo.12345678.tmp",
+      "index.html",
+    ]);
+  });
+});
+
+describe("createProjectSignature", () => {
+  it("changes after same-size content is written with the original mtime restored", () => {
+    const project = mkdtempSync(resolve(tmpdir(), "hf-signature-"));
+    temporaryProjects.push(project);
+    const file = resolve(project, "index.html");
+    const descriptor = openSync(file, "w+");
+    try {
+      writeSync(descriptor, "first");
+      const originalMtime = fstatSync(descriptor).mtime;
+      const before = createProjectSignature(project);
+
+      ftruncateSync(descriptor, 0);
+      writeSync(descriptor, "other", 0, "utf8");
+      futimesSync(descriptor, originalMtime, originalMtime);
+
+      expect(createProjectSignature(project)).not.toBe(before);
+    } finally {
+      closeSync(descriptor);
+    }
   });
 });

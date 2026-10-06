@@ -42,7 +42,7 @@ function makeParams(overrides: Partial<Params> = {}): Params {
     moveKeyframe: vi.fn().mockResolvedValue(true),
     resizeKeyframedTween: vi.fn().mockResolvedValue(true),
     convertToKeyframes: resolved(),
-    removeAllKeyframes: resolved(),
+    removeAllKeyframes: vi.fn().mockResolvedValue(true),
     handleDomManualEditsReset: vi.fn(),
     selectedGsapAnimations: [],
     showToast: vi.fn(),
@@ -113,7 +113,9 @@ describe("useGsapSelectionHandlers save failures", () => {
       makeParams({ addGsapAnimation: vi.fn().mockRejectedValue(error), showToast }),
     );
 
-    act(() => rendered.handlers().handleGsapAddAnimation("to"));
+    act(() => {
+      void rendered.handlers().handleGsapAddAnimation("to");
+    });
     await flushRejection();
 
     expect(showToast).not.toHaveBeenCalled();

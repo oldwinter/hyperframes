@@ -1,9 +1,15 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
-import { useMountEffect } from "../../hooks/useMountEffect";
+import { memo, useMemo, type CSSProperties } from "react";
 import { useThumbnailLease } from "../../hooks/useThumbnailLease";
-import { createThumbnailKey, type ThumbnailPriority } from "../lib/thumbnailScheduler";
+import { useThumbnailStripSize } from "../../hooks/useThumbnailStripSize";
+import {
+  createThumbnailKey,
+  type ThumbnailPriority,
+  type ThumbnailRequest,
+} from "../lib/thumbnailScheduler";
 import { TIMELINE_VIEWPORT_BUDGETS } from "../lib/timelineViewportBudgets";
+import { ThumbnailTiles } from "./ThumbnailTiles";
 import { computeThumbnailStrip, probeImageAspect } from "./thumbnailUtils";
+import { studioApiFetch } from "../../utils/studioApiFetch";
 
 interface CompositionThumbnailProps {
   previewUrl: string;
@@ -17,12 +23,26 @@ interface CompositionThumbnailProps {
   height?: number;
   projectId?: string;
   sessionEpoch?: number;
+  contentRevision?: number;
   priority?: ThumbnailPriority;
   rich?: boolean;
 }
 
-const CLIP_HEIGHT = 66;
 const THUMBNAIL_URL_VERSION = "v3";
+export const THUMBNAIL_SEEK_TIME_SECONDS = 3;
+
+export function resolveThumbnailSeekTime(durationSeconds: number | null | undefined): number {
+  if (
+    Number.isFinite(durationSeconds) &&
+    durationSeconds != null &&
+    durationSeconds > 0 &&
+    durationSeconds <= THUMBNAIL_SEEK_TIME_SECONDS
+  ) {
+    return durationSeconds / 2;
+  }
+
+  return THUMBNAIL_SEEK_TIME_SECONDS;
+}
 
 export function buildCompositionThumbnailUrl({
   previewUrl,
@@ -32,6 +52,7 @@ export function buildCompositionThumbnailUrl({
   selectorIndex,
   origin,
   output,
+  contentRevision = 0,
 }: {
   previewUrl: string;
   seekTime?: number;
@@ -42,10 +63,10 @@ export function buildCompositionThumbnailUrl({
   /**
    * Capture density. Omitted, the route bounds the image to its preview cap —
    * right for the timeline, where thumbnails are small and numerous and their
-   * decoded bytes are budgeted. `"storyboard"` caps the longest side at a
-   * high-density review size; `"source"` uses the composition's own dimensions.
+   * decoded bytes are budgeted. `"source"` uses the composition's own dimensions.
    */
-  output?: "source" | "storyboard";
+  output?: "source";
+  contentRevision?: number;
 }): string {
   const thumbnailBase = previewUrl
     .replace("/preview/comp/", "/thumbnail/")
@@ -53,6 +74,7 @@ export function buildCompositionThumbnailUrl({
   const thumbnailUrl = new URL(thumbnailBase, origin);
   thumbnailUrl.searchParams.set("t", (seekTime + duration / 2).toFixed(2));
   thumbnailUrl.searchParams.set("v", THUMBNAIL_URL_VERSION);
+  thumbnailUrl.searchParams.set("revision", String(contentRevision));
   if (output) thumbnailUrl.searchParams.set("output", output);
   if (selector) {
     thumbnailUrl.searchParams.set("selector", selector);
@@ -63,8 +85,30 @@ export function buildCompositionThumbnailUrl({
   return thumbnailUrl.toString();
 }
 
+/** The composition a preview URL renders: `/preview/comp/<path>`, or the root for `/preview`. */
+export function compositionPathOfPreviewUrl(previewUrl: string): string {
+  const match = /\/preview\/comp\/([^?#]+)/.exec(previewUrl);
+  return match?.[1] ? decodeURIComponent(match[1]) : "index.html";
+}
+
+export function compositionThumbnailRequest(
+  url: string,
+  projectId: string,
+  { sessionEpoch = 0, priority = "visible", rich = false }: Partial<ThumbnailRequest> = {},
+): ThumbnailRequest {
+  return {
+    key: createThumbnailKey({ kind: "composition", url }),
+    projectId,
+    sessionEpoch,
+    kind: "composition",
+    priority,
+    rich,
+    load: (signal: AbortSignal) => loadCompositionImage(url, signal),
+  };
+}
+
 async function loadCompositionImage(url: string, signal: AbortSignal) {
-  const response = await fetch(url, { signal });
+  const response = await studioApiFetch(url, { signal });
   if (!response.ok) throw new Error(`Composition thumbnail failed (${response.status})`);
   const blob = await response.blob();
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -96,10 +140,10 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
   duration = 5,
   projectId = previewUrl,
   sessionEpoch = 0,
+  contentRevision = 0,
   priority = "visible",
 }: CompositionThumbnailProps) {
-  const [containerWidth, setContainerWidth] = useState(0);
-  const observerRef = useRef<ResizeObserver | null>(null);
+  const [container, setContainerRef, watchGap] = useThumbnailStripSize();
   const url = buildCompositionThumbnailUrl({
     previewUrl,
     seekTime,
@@ -107,68 +151,55 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
     selector,
     selectorIndex,
     origin: window.location.origin,
+    contentRevision,
   });
   const request = useMemo(
-    () => ({
-      key: createThumbnailKey({ kind: "composition", url }),
-      projectId,
-      sessionEpoch,
-      kind: "composition" as const,
-      priority,
-      rich: true,
-      load: (signal: AbortSignal) => loadCompositionImage(url, signal),
-    }),
+    () => compositionThumbnailRequest(url, projectId, { sessionEpoch, priority, rich: true }),
     [priority, projectId, sessionEpoch, url],
   );
   const snapshot = useThumbnailLease(request);
   const value =
     snapshot.status === "ready" && snapshot.value.kind === "image" ? snapshot.value : null;
   const { frameW, frameCount } = computeThumbnailStrip(
-    containerWidth,
+    container.width,
     value?.aspect ?? 16 / 9,
-    CLIP_HEIGHT,
+    container.height,
     48,
   );
-
-  const setContainerRef = useCallback((element: HTMLDivElement | null) => {
-    observerRef.current?.disconnect();
-    if (!element) return;
-    const target = element.parentElement ?? element;
-    setContainerWidth(target.clientWidth);
-    observerRef.current = new ResizeObserver(([entry]) =>
-      setContainerWidth(entry.contentRect.width),
-    );
-    observerRef.current.observe(target);
-  }, []);
-
-  useMountEffect(() => () => observerRef.current?.disconnect());
 
   return (
     <div ref={setContainerRef} className="absolute inset-0 overflow-hidden">
       {value && (
-        <div
-          className="absolute inset-0 flex"
-          style={{ animation: "hf-thumb-fade 200ms ease-out", mixBlendMode: "lighten" }}
+        <ThumbnailTiles
+          strip={container}
+          frameW={frameW}
+          frameCount={frameCount}
+          watchGap={watchGap}
+          style={{
+            animation: "hf-thumb-fade 200ms ease-out",
+            mixBlendMode:
+              "var(--timeline-composition-thumbnail-blend)" as CSSProperties["mixBlendMode"],
+          }}
         >
-          {Array.from({ length: frameCount }, (_, index) => (
+          {(index) => (
             <div
               key={index}
-              className="relative h-full flex-shrink-0 overflow-hidden"
+              className="relative h-full shrink-0 overflow-hidden"
               style={{ width: frameW }}
             >
               <img
                 src={value.url}
                 alt=""
                 draggable={false}
-                className="absolute inset-0 h-full w-full object-cover"
-                style={{ opacity: 0.7 }}
+                className="absolute inset-0 h-full w-full object-contain"
+                style={{ opacity: "var(--timeline-composition-thumbnail-opacity)" }}
               />
             </div>
-          ))}
-        </div>
+          )}
+        </ThumbnailTiles>
       )}
       {snapshot.status === "loading" && (
-        <div className="absolute inset-0 animate-pulse bg-white/[0.035]" />
+        <div className="absolute inset-0 animate-pulse bg-text-0/[0.035]" />
       )}
       {label && (
         <div className="absolute inset-y-0 left-3 z-10 flex items-center">

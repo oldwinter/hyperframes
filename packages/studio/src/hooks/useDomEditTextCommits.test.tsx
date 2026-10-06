@@ -98,6 +98,7 @@ function commitParams(
     buildDomSelectionFromTarget: vi.fn(async () => null),
     persistDomEditOperations: vi.fn().mockResolvedValue(undefined),
     resolveImportedFontAsset: () => null,
+    readOnlyPreview: false,
     ...overrides,
   };
 }
@@ -124,6 +125,151 @@ afterEach(() => {
 });
 
 describe("useDomEditTextCommits", () => {
+  function richTextProbe(
+    html = '<h1 id="t">Old</h1>',
+    overrides: (doc: Document) => Partial<UseDomEditTextCommitsParams> = () => ({}),
+  ) {
+    const { iframe, element } = previewElement(html, "t");
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const showToast = vi.fn();
+    const base = commitParams({
+      previewIframeRef: { current: iframe },
+      domEditSelection: selectionFor(element),
+      buildDomSelectionFromTarget: vi.fn(async (target: HTMLElement) => selectionFor(target)),
+      persistDomEditOperations: persist,
+      showToast,
+      ...overrides(element.ownerDocument),
+    });
+    const captured: { hook: ReturnType<typeof useDomEditTextCommits> | null } = { hook: null };
+    function Probe({ readOnlyPreview }: { readOnlyPreview: boolean }) {
+      captured.hook = useDomEditTextCommits({ ...base, readOnlyPreview });
+      return null;
+    }
+    const root = mountReactHarness(<Probe readOnlyPreview={false} />);
+    cleanup = () => act(() => root.unmount());
+    const save = captured.hook!.handleDomRichTextCommit;
+    const commit = { element, html: "New", previousHtml: "Old" };
+    element.innerHTML = "New";
+    return {
+      root,
+      Probe,
+      persist,
+      showToast,
+      element,
+      save: () => act(async () => save(commit)),
+    };
+  }
+
+  it.each([true, false])(
+    "counts in-place text only after a changed write (%s)",
+    async (changed) => {
+      vi.mocked(trackStudioEvent).mockClear();
+      const { persist, save } = richTextProbe();
+      persist.mockResolvedValue({ changed, sourceFile: "private.html", version: "v2" });
+      await save();
+      expect(vi.mocked(trackStudioEvent).mock.calls).toEqual(
+        changed
+          ? [["feature_used", { feature: "text_edit", surface: "preview", method: "field" }]]
+          : [],
+      );
+    },
+  );
+
+  it("saves in-place text while the preview is editable, and refreshes the selection it edited", async () => {
+    const applyDomSelection = vi.fn();
+    const { persist, element, save } = richTextProbe(undefined, () => ({ applyDomSelection }));
+    await save();
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(applyDomSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ element }),
+      expect.objectContaining({ preserveGroup: true }),
+    );
+  });
+
+  it("refuses in-place text once the preview turns read-only, through an earlier handler, and puts the old text back", async () => {
+    const { root, Probe, persist, element, save } = richTextProbe();
+    act(() => root.render(<Probe readOnlyPreview />));
+    await save();
+    expect(persist).not.toHaveBeenCalled();
+    expect(element.innerHTML).toBe("Old");
+  });
+
+  it("saves the edited element, and leaves the selection alone, when the selection is another element or none", async () => {
+    for (const selected of ["card", null]) {
+      const applyDomSelection = vi.fn();
+      const { persist, element, save } = richTextProbe(
+        '<div id="card"><p id="t">Old</p></div>',
+        (doc) => ({
+          domEditSelection: selected ? selectionFor(doc.getElementById(selected)!) : null,
+          applyDomSelection,
+          buildDomSelectionFromTarget: vi.fn(async (target: HTMLElement) => ({
+            ...selectionFor(target),
+            label: "Resolved from the edited element",
+          })),
+        }),
+      );
+      await save();
+      expect(persist).toHaveBeenCalledTimes(1);
+      expect(persist.mock.calls[0]![0]).toMatchObject({
+        element,
+        label: "Resolved from the edited element",
+      });
+      expect(applyDomSelection).not.toHaveBeenCalled();
+      cleanup?.();
+      cleanup = null;
+    }
+  });
+
+  it("says so and puts the old text back when the edited text cannot be saved", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { persist, showToast, element, save } = richTextProbe(undefined, () => ({
+      buildDomSelectionFromTarget: vi.fn(async () => null),
+    }));
+    await save();
+    expect(persist).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining("Couldn't save"), "error");
+    expect(error).toHaveBeenCalled();
+    expect(element.innerHTML).toBe("Old");
+  });
+
+  it("keeps concurrent text commit ownership isolated by target", async () => {
+    const { iframe, element: firstElement } = previewElement(
+      "<div id='first'>First</div><div id='second'>Second</div>",
+      "first",
+    );
+    const secondElement = iframe.contentDocument?.getElementById("second") as HTMLElement;
+    const firstSelection = selectionFor(firstElement);
+    const secondSelection = selectionFor(secondElement);
+    const firstPersist = createDeferred<void>();
+    const persistDomEditOperations = vi
+      .fn()
+      .mockImplementationOnce(() => firstPersist.promise)
+      .mockResolvedValueOnce(undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const hook = renderTextCommitHook(
+      commitParams({
+        previewIframeRef: { current: iframe },
+        domEditSelection: firstSelection,
+        persistDomEditOperations,
+      }),
+    );
+
+    let firstCommit: Promise<unknown> | undefined;
+    act(() => {
+      firstCommit = hook.handleDomTextCommitForSelection(firstSelection, "Pending first", "self");
+    });
+    await act(async () => {
+      await hook.handleDomTextCommitForSelection(secondSelection, "Saved second", "self");
+    });
+    firstPersist.reject(new Error("first target failed"));
+    await act(async () => {
+      await firstCommit;
+    });
+
+    expect(firstElement.textContent).toBe("First");
+    expect(secondElement.textContent).toBe("Saved second");
+  });
+
   it("does not let a stale failed fields commit revert newer text", async () => {
     const { iframe, element } = previewElement("<div id='card'>Original</div>", "card");
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -183,8 +329,17 @@ describe("useDomEditTextCommits", () => {
   it("reports a successful style commit", async () => {
     const { iframe, element } = previewElement("<div id='card'>Original</div>", "card");
     const selection = selectionFor(element);
+    const persistence = {
+      sourceFile: "index.html",
+      version: '"sha256:after"',
+      changed: true,
+    } as const;
     const hook = renderTextCommitHook(
-      commitParams({ previewIframeRef: { current: iframe }, domEditSelection: selection }),
+      commitParams({
+        previewIframeRef: { current: iframe },
+        domEditSelection: selection,
+        persistDomEditOperations: vi.fn().mockResolvedValue(persistence),
+      }),
     );
 
     let outcome: unknown;
@@ -192,7 +347,30 @@ describe("useDomEditTextCommits", () => {
       outcome = await hook.handleDomStyleCommit("color", "red");
     });
 
-    expect(outcome).toEqual({ ok: true });
+    expect(outcome).toEqual({ ok: true, persistence });
+  });
+
+  it("saves a style map on a selection as one patch, so it is one undo step", async () => {
+    const { iframe, element } = previewElement("<div id='card'>Original</div>", "card");
+    const persist = vi.fn().mockResolvedValue({ sourceFile: "index.html", changed: true });
+    const hook = renderTextCommitHook(
+      commitParams({
+        previewIframeRef: { current: iframe },
+        domEditSelection: null,
+        persistDomEditOperations: persist,
+      }),
+    );
+
+    await act(async () => {
+      await hook.handleDomStyleCommitForSelection(selectionFor(element), {
+        "border-width": "4px",
+        "border-style": "solid",
+      });
+    });
+
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(element.style.borderWidth).toBe("4px");
+    expect(element.style.borderStyle).toBe("solid");
   });
 
   it("declines a style commit with no selection, without reaching the writer", async () => {
@@ -286,4 +464,44 @@ describe("useDomEditTextCommits", () => {
     expect(outcome).toEqual({ ok: false, reason: "no-selection" });
     expect(persistDomEditOperations).not.toHaveBeenCalled();
   });
+
+  it("preserves text persistence evidence for an explicit selection", async () => {
+    const { iframe, element: ambientElement } = previewElement(
+      "<div id='ambient'>Ambient</div><div id='agent'>Agent</div>",
+      "ambient",
+    );
+    const agentElement = iframe.contentDocument?.getElementById("agent") as HTMLElement;
+    const ambientSelection = selectionFor(ambientElement);
+    const agentSelection = selectionFor(agentElement);
+    const persistence = {
+      sourceFile: "index.html",
+      version: '"sha256:text"',
+      changed: true,
+    } as const;
+    const persistDomEditOperations = vi.fn().mockResolvedValue(persistence);
+    const hook = renderTextCommitHook(
+      commitParams({
+        previewIframeRef: { current: iframe },
+        domEditSelection: ambientSelection,
+        persistDomEditOperations,
+      }),
+    );
+
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await hook.handleDomTextCommitForSelection(agentSelection, "Edited", "self");
+    });
+
+    expect(outcome).toEqual({ ok: true, persistence });
+    expect(persistDomEditOperations).toHaveBeenCalledWith(
+      agentSelection,
+      expect.any(Array),
+      expect.any(Object),
+    );
+    expect(ambientElement.textContent).toBe("Ambient");
+    expect(agentElement.textContent).toBe("Edited");
+  });
 });
+
+vi.mock("../utils/studioTelemetry", () => ({ trackStudioEvent: vi.fn() }));
+import { trackStudioEvent } from "../utils/studioTelemetry";

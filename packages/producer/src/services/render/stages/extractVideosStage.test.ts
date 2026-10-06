@@ -14,9 +14,10 @@ import {
   assertVideoExtractionSucceeded,
   buildHdrProbeStageError,
   resolveVideoExtractionPolicy,
-  shouldCopyExtractedFrames,
+  safeVideoExtractionSourceLogMetadata,
   VideoExtractionStageError,
 } from "./extractVideosStage.js";
+import { EncoderInterruptedError } from "../encoderInterruption.js";
 
 function makeVideo(overrides: Partial<VideoElement> = {}): VideoElement {
   return {
@@ -78,6 +79,21 @@ function extractionResult(errors: VideoExtractionFailure[]): ExtractionResult {
   };
 }
 
+describe("encoder interruption classification", () => {
+  it("preserves an external ffmpeg interruption as the structured retry signal", () => {
+    const result = extractionResult([
+      {
+        videoId: "v1",
+        kind: "external_interruption",
+        retryable: true,
+        error: "ffmpeg handled signal 15",
+      },
+    ]);
+
+    expect(() => assertVideoExtractionSucceeded(result)).toThrow(EncoderInterruptedError);
+  });
+});
+
 describe("appendAutoDetectedVideoAudio", () => {
   it("adds audio for an audible video whose file has an audio track", () => {
     const composition = { videos: [makeVideo()], audios: [] as never[] };
@@ -92,6 +108,15 @@ describe("appendAutoDetectedVideoAudio", () => {
   it("skips a muted video even when the source file has audio", () => {
     const composition = {
       videos: [makeVideo({ hasAudio: false })],
+      audios: [] as never[],
+    };
+    appendAutoDetectedVideoAudio(composition, [makeExtracted("v1", true)]);
+    expect(composition.audios).toHaveLength(0);
+  });
+
+  it("skips a hidden video so a track hidden in Studio stays silent in the render", () => {
+    const composition = {
+      videos: [makeVideo({ hidden: true })],
       audios: [] as never[],
     };
     appendAutoDetectedVideoAudio(composition, [makeExtracted("v1", true)]);
@@ -193,17 +218,6 @@ describe("HDR probe src resolution (PRINFRA-349)", () => {
   });
 });
 
-describe("shouldCopyExtractedFrames", () => {
-  it("copies frames on Windows (symlinkSync throws EPERM without Developer Mode)", () => {
-    expect(shouldCopyExtractedFrames("win32")).toBe(true);
-  });
-
-  it("symlinks on macOS and Linux (cheaper, symlinks allowed)", () => {
-    expect(shouldCopyExtractedFrames("darwin")).toBe(false);
-    expect(shouldCopyExtractedFrames("linux")).toBe(false);
-  });
-});
-
 describe("resolveVideoExtractionPolicy", () => {
   it("enforces extraction failures by default (#3372)", () => {
     expect(resolveVideoExtractionPolicy({})).toEqual({
@@ -230,6 +244,28 @@ describe("resolveVideoExtractionPolicy", () => {
         HF_VIDEO_EXTRACTION_MAX_RETRIES: "1",
       }),
     ).toEqual({ failureMode: "enforce", maxTransientRetries: 1 });
+  });
+});
+
+describe("safeVideoExtractionSourceLogMetadata", () => {
+  it("logs only a query-free fingerprint and normalized host for a signed remote source", () => {
+    const source =
+      "https://MEDIA.CUSTOMER-CDN.EXAMPLE/private/clip.mp4?X-Amz-Signature=super-secret#fragment";
+    const metadata = safeVideoExtractionSourceLogMetadata(source);
+
+    expect(metadata).toMatchObject({
+      sourceType: "remote",
+      sourceFingerprint: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      host: "media.customer-cdn.example",
+    });
+    expect(JSON.stringify(metadata)).not.toContain("super-secret");
+    expect(JSON.stringify(metadata)).not.toContain("/private/clip.mp4");
+  });
+
+  it("uses a non-sensitive marker for local sources", () => {
+    expect(safeVideoExtractionSourceLogMetadata("/private/render/clip.mp4")).toEqual({
+      sourceType: "local",
+    });
   });
 });
 
@@ -301,6 +337,57 @@ describe("assertVideoExtractionSucceeded", () => {
         failures: [{ kind: "download_transient", count: 2 }],
       }),
     );
+  });
+
+  it("attaches bounded, deterministic v1 groups while keeping kind counts exhaustive", () => {
+    const errors: VideoExtractionFailure[] = Array.from({ length: 9 }, (_, index) => ({
+      videoId: `private-${index}`,
+      kind: "download_transient",
+      retryable: true,
+      group: {
+        sourceFingerprint: `sha256:${index.toString(16).padStart(64, "0")}`,
+        host: index % 2 === 0 ? "media.customer-cdn.example" : "other",
+        statusClass: "http_5xx",
+        retry: { phase: "download", used: 1, budget: 1 },
+      },
+      error: `https://media.customer-cdn.example/private/${index}.mp4?signature=secret`,
+    }));
+    errors.push(
+      {
+        videoId: "bad-a",
+        kind: "invalid_media",
+        retryable: false,
+        error: "/tmp/private-a.mp4",
+      },
+      {
+        videoId: "bad-b",
+        kind: "invalid_media",
+        retryable: false,
+        error: "/tmp/private-b.mp4",
+      },
+    );
+
+    let caught: unknown;
+    try {
+      assertVideoExtractionSucceeded(extractionResult(errors));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(VideoExtractionStageError);
+    if (!(caught instanceof VideoExtractionStageError)) return;
+
+    expect(caught.extractionFailure.schemaVersion).toBe(1);
+    expect(caught.extractionFailure.kindCounts).toEqual([
+      { kind: "download_transient", affectedElementCount: 9 },
+      { kind: "invalid_media", affectedElementCount: 2 },
+    ]);
+    expect(caught.extractionFailure.groups).toHaveLength(8);
+    expect(caught.extractionFailure.omittedGroupCount).toBe(2);
+    expect(caught.extractionFailure.groups.map((group) => group.sourceFingerprint)).toEqual(
+      Array.from({ length: 8 }, (_, index) => `sha256:${index.toString(16).padStart(64, "0")}`),
+    );
+    expect(JSON.stringify(caught.extractionFailure)).not.toContain("signature=secret");
+    expect(JSON.stringify(caught.extractionFailure)).not.toContain("private-");
   });
 
   it("fails closed for legacy failures without a kind or retryability", () => {

@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/shader-transitions",
-  "version": "0.8.20",
+  "version": "0.8.135",
   "description": "WebGL shader transitions for HyperFrames compositions",
   "repository": {
     "type": "git",
@@ -23,8 +23,7 @@
     }
   },
   "publishConfig": {
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts",
+    "access": "public",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
@@ -33,7 +32,8 @@
         "require": "./dist/index.cjs"
       }
     },
-    "access": "public"
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts"
   },
   "scripts": {
     "build": "tsup",
@@ -44,8 +44,8 @@
     "html2canvas": "^1.4.1"
   },
   "devDependencies": {
-    "tsup": "^8.5.1",
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.11"
   }
 }

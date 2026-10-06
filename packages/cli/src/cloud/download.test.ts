@@ -1,4 +1,15 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -109,4 +120,105 @@ describe("cloud/download", () => {
     ).rejects.toThrow();
     expect(() => statSync(dest)).toThrow();
   });
+
+  async function expectFailedReplacement(dest: string, fetchImpl: typeof fetch, error: RegExp) {
+    await expect(downloadToFile("https://example/x", dest, { fetchImpl })).rejects.toThrow(error);
+    expect(readFileSync(dest, "utf8")).toBe("previous render");
+    expect(readdirSync(dir)).toEqual(["out.mp4"]);
+  }
+
+  it("preserves an existing output when the response is truncated", async () => {
+    const dest = join(dir, "out.mp4");
+    writeFileSync(dest, "previous render");
+    await expectFailedReplacement(
+      dest,
+      makeBytesFetch(new Uint8Array([1]), { "content-length": "2" }),
+      /Truncated download/,
+    );
+  });
+
+  it("keeps the old output visible until successful replacement and preserves its mode", async () => {
+    const dest = join(dir, "out.mp4");
+    writeFileSync(dest, "previous render");
+    chmodSync(dest, 0o640);
+    await downloadToFile("https://example/x", dest, {
+      fetchImpl: makeBytesFetch(new Uint8Array([42])),
+      onProgress: () => {
+        expect(readFileSync(dest, "utf8")).toBe("previous render");
+        expect(readdirSync(dir).filter((name) => name.startsWith(".hf-download-"))).toHaveLength(1);
+      },
+    });
+    expect(readFileSync(dest)).toEqual(Buffer.from([42]));
+    if (process.platform !== "win32") expect(statSync(dest).mode & 0o777).toBe(0o640);
+    expect(readdirSync(dir)).toEqual(["out.mp4"]);
+  });
+
+  it("preserves the previous output when cancelled during progress", async () => {
+    const dest = join(dir, "out.mp4");
+    writeFileSync(dest, "previous render");
+    const controller = new AbortController();
+    await expect(
+      downloadToFile("https://example/x", dest, {
+        fetchImpl: makeBytesFetch(new Uint8Array(1024 * 1024)),
+        signal: controller.signal,
+        onProgress: () => controller.abort(new Error("user cancelled")),
+      }),
+    ).rejects.toThrow(/user cancelled/);
+    expect(readFileSync(dest, "utf8")).toBe("previous render");
+    expect(readdirSync(dir)).toEqual(["out.mp4"]);
+  });
+
+  it("preserves the previous output when the response stream errors", async () => {
+    const dest = join(dir, "out.mp4");
+    writeFileSync(dest, "previous render");
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent) controller.error(new Error("network interrupted"));
+        else {
+          sent = true;
+          controller.enqueue(new Uint8Array([42]));
+        }
+      },
+    });
+    await expectFailedReplacement(
+      dest,
+      (async () => new Response(body)) as typeof fetch,
+      /network interrupted/,
+    );
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "preserves existing and dangling output symlinks",
+    async () => {
+      const target = join(dir, "target.mp4");
+      const alias = join(dir, "alias.mp4");
+      symlinkSync("target.mp4", alias);
+      for (const value of [1, 2]) {
+        await downloadToFile("https://example/x", alias, {
+          fetchImpl: makeBytesFetch(new Uint8Array([value])),
+        });
+        expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+        expect(readFileSync(target)).toEqual(Buffer.from([value]));
+      }
+      expect(readdirSync(dir).sort()).toEqual(["alias.mp4", "target.mp4"]);
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "follows a relative output link inside a linked folder to the real target",
+    async () => {
+      mkdirSync(join(dir, "real/deep/sub"), { recursive: true });
+      mkdirSync(join(dir, "root"));
+      symlinkSync(join(dir, "real/deep/sub"), join(dir, "root/sub"));
+      symlinkSync("../target.mp4", join(dir, "real/deep/sub/alias.mp4"));
+
+      await downloadToFile("https://example/x", join(dir, "root/sub/alias.mp4"), {
+        fetchImpl: makeBytesFetch(new Uint8Array([7])),
+      });
+
+      expect(readFileSync(join(dir, "real/deep/target.mp4"))).toEqual(Buffer.from([7]));
+      expect(readdirSync(join(dir, "root")).sort()).toEqual(["sub"]);
+    },
+  );
 });

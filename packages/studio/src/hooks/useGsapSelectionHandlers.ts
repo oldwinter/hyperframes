@@ -109,9 +109,16 @@ export function useGsapSelectionHandlers({
     duration?: number,
     commitOverrides?: Partial<CommitMutationOptions>,
   ) => Promise<void>;
-  removeAllKeyframes: (sel: DomEditSelection, animId: string) => Promise<void>;
+  removeAllKeyframes: (
+    sel: DomEditSelection,
+    animId: string,
+    action?: "remove_all" | "reset",
+    telemetry?: boolean,
+  ) => Promise<boolean>;
 
-  handleDomManualEditsReset: (sel: DomEditSelection) => Promise<void>;
+  handleDomManualEditsReset: (
+    sel: DomEditSelection,
+  ) => Promise<void | import("./domEditCommitTypes").DomEditPersistOutcome>;
   selectedGsapAnimations: GsapAnimation[];
   showToast: (message: string, tone?: "error" | "info") => void;
 }) {
@@ -200,8 +207,13 @@ export function useGsapSelectionHandlers({
   const handleGsapDeleteAnimation = useCallback(
     (animId: string, selectionOverride?: DomEditSelection | null) => {
       const sel = resolveWriteSelection(selectionOverride);
-      if (!sel) return;
-      observeGsapMutation(deleteGsapAnimation(sel, animId), sel, "delete", "Delete GSAP animation");
+      if (!sel) return Promise.resolve(false);
+      return observeGsapMutation(
+        deleteGsapAnimation(sel, animId),
+        sel,
+        "delete",
+        "Delete GSAP animation",
+      );
     },
     [resolveWriteSelection, deleteGsapAnimation, observeGsapMutation],
   );
@@ -222,20 +234,25 @@ export function useGsapSelectionHandlers({
   );
 
   const handleGsapAddAnimation = useCallback(
-    (method: "to" | "from" | "set" | "fromTo") => {
-      if (!domEditSelection) return;
-      void addGsapAnimation(domEditSelection, method, usePlayerStore.getState().currentTime).catch(
-        (error) => {
-          trackGsapHandlerFailure(error, domEditSelection, "add", `Add GSAP ${method} animation`);
-        },
+    (method: "to" | "from" | "set" | "fromTo", selectionOverride?: DomEditSelection | null) => {
+      const selection = resolveWriteSelection(selectionOverride);
+      if (!selection) return Promise.resolve(false);
+      const landed = observeGsapMutation(
+        addGsapAnimation(selection, method, usePlayerStore.getState().currentTime),
+        selection,
+        "add",
+        `Add GSAP ${method} animation`,
       );
-      if (domEditSelection.element.hasAttribute("data-hf-studio-path-offset")) {
+      if (selection.element.hasAttribute("data-hf-studio-path-offset")) {
         // The reset owns rollback and the position commit already owns user and
         // telemetry reporting. This is only the fire-and-forget UI boundary.
-        void handleDomManualEditsReset(domEditSelection).catch(() => undefined);
+        void landed.then((didLand) => {
+          if (didLand) void handleDomManualEditsReset(selection).catch(() => undefined);
+        });
       }
+      return landed;
     },
-    [domEditSelection, addGsapAnimation, handleDomManualEditsReset, trackGsapHandlerFailure],
+    [resolveWriteSelection, addGsapAnimation, handleDomManualEditsReset, observeGsapMutation],
   );
 
   const handleGsapAddProperty = useCallback(
@@ -313,7 +330,6 @@ export function useGsapSelectionHandlers({
     ) => {
       const sel = resolveWriteSelection(selectionOverride);
       if (!sel) return;
-      trackStudioEvent("keyframe", { action: "add", property });
       addKeyframe(sel, animId, percentage, property, value);
     },
     [resolveWriteSelection, addKeyframe],
@@ -431,31 +447,31 @@ export function useGsapSelectionHandlers({
   );
 
   const handleGsapRemoveAllKeyframes = useCallback(
-    (animId: string, selectionOverride?: DomEditSelection | null) => {
+    (animId: string, selectionOverride?: DomEditSelection | null, telemetry = true) => {
       const selection = resolveWriteSelection(selectionOverride);
       if (!selection) return Promise.resolve(false);
-      return observeGsapMutation(
-        removeAllKeyframes(selection, animId),
-        selection,
-        "remove-all-keyframes",
-        "Remove all keyframes",
-      );
+      return removeAllKeyframes(selection, animId, "remove_all", telemetry).catch((error) => {
+        trackGsapHandlerFailure(error, selection, "remove-all-keyframes", "Remove all keyframes");
+        return false;
+      });
     },
-    [resolveWriteSelection, observeGsapMutation, removeAllKeyframes],
+    [resolveWriteSelection, trackGsapHandlerFailure, removeAllKeyframes],
   );
 
   const handleResetSelectedElementKeyframes = useCallback((): boolean => {
     if (!domEditSelection) return false;
     const withKeyframes = selectedGsapAnimations.find((a) => a.keyframes);
     if (!withKeyframes) return false;
-    observeGsapMutation(
-      removeAllKeyframes(domEditSelection, withKeyframes.id),
-      domEditSelection,
-      "remove-all-keyframes",
-      "Remove all keyframes",
-    );
+    void removeAllKeyframes(domEditSelection, withKeyframes.id, "reset").catch((error) => {
+      trackGsapHandlerFailure(
+        error,
+        domEditSelection,
+        "remove-all-keyframes",
+        "Remove all keyframes",
+      );
+    });
     return true;
-  }, [domEditSelection, observeGsapMutation, removeAllKeyframes, selectedGsapAnimations]);
+  }, [domEditSelection, trackGsapHandlerFailure, removeAllKeyframes, selectedGsapAnimations]);
 
   return {
     handleGsapUpdateProperty,

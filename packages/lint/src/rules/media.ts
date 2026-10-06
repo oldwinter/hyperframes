@@ -1,6 +1,19 @@
 import type { LintContext, HyperframeLintFinding, OpenTag } from "../context";
-import { readAttr, readDecodedAttr, stripJsComments, truncateSnippet, isMediaTag } from "../utils";
+import {
+  readAttr,
+  readDecodedAttr,
+  stripJsComments,
+  truncateSnippet,
+  isMediaTag,
+  hasAttrName,
+  isAudibleVideoTag,
+  mediaTimeWindow,
+  mediaWindowsOverlap,
+} from "../utils";
 import { validateColorGradingContract } from "@hyperframes/parsers/color-grading-contract";
+import { extractMediaSrcMutations } from "@hyperframes/parsers/composition";
+import { parseHTML } from "linkedom";
+import { findLinkedClipFindings } from "./linkedClips";
 
 /**
  * Does the GSAP call that names `#id` also set `volume` in the same call?
@@ -35,10 +48,122 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function hasAttrName(tagSource: string, attr: string): boolean {
-  const escaped = escapeRegExp(attr);
-  const attrs = tagSource.replace(/^<\s*[a-z][\w:-]*/i, "");
-  return new RegExp(`(?:^|\\s)${escaped}(?:\\s*=|\\s|/?>)`, "i").test(attrs);
+const IMAGE_SRC_EXT = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "bmp",
+  "webp",
+  "svg",
+  "heic",
+  "heif",
+  "tiff",
+  "ico",
+]);
+const VIDEO_SRC_EXT = new Set([
+  "mp4",
+  "mov",
+  "avi",
+  "webm",
+  "mkv",
+  "flv",
+  "wmv",
+  "m4v",
+  "mpg",
+  "mpeg",
+]);
+
+const AUDIO_SRC_EXT = new Set(["mp3", "wav", "aac", "flac", "opus", "aiff", "wma"]);
+
+type SrcKind = "image" | "video" | "audio";
+
+const SRC_KIND_NOUN: Record<SrcKind, string> = {
+  image: "an image",
+  video: "a video",
+  audio: "an audio file",
+};
+
+function srcKind(src: string): SrcKind | null {
+  const stripped = src.trim();
+  if (!stripped) return null;
+  const lower = stripped.toLowerCase();
+  if (lower.startsWith("data:")) {
+    const mime = /^data:([^;,]+)/i.exec(stripped)?.[1]?.toLowerCase();
+    if (!mime) return null;
+    if (mime.startsWith("image/")) return "image";
+    if (mime.startsWith("video/")) return "video";
+    if (mime.startsWith("audio/")) return "audio";
+    return null;
+  }
+  if (lower.startsWith("blob:")) return null;
+  let pathname = stripped;
+  try {
+    if (/^https?:/i.test(stripped)) {
+      pathname = decodeURIComponent(new URL(stripped).pathname);
+    } else {
+      pathname = stripped.split("?")[0]?.split("#")[0] ?? stripped;
+    }
+  } catch {
+    pathname = stripped.split("?")[0]?.split("#")[0] ?? stripped;
+  }
+  const base = pathname.split("/").pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  if (dot < 0) return null;
+  const ext = base.slice(dot + 1).toLowerCase();
+  if (IMAGE_SRC_EXT.has(ext)) return "image";
+  if (VIDEO_SRC_EXT.has(ext)) return "video";
+  if (AUDIO_SRC_EXT.has(ext)) return "audio";
+  return null;
+}
+
+function findMediaSrcKindMismatchFindings(ctx: LintContext): HyperframeLintFinding[] {
+  const findings: HyperframeLintFinding[] = [];
+  for (const tag of ctx.tags) {
+    if (tag.name !== "video" && tag.name !== "img") continue;
+    const src = readAttr(tag.raw, "src");
+    if (!src) continue;
+    const kind = srcKind(src);
+    if (kind === null) continue;
+    const expected = tag.name === "video" ? "video" : "image";
+    if (kind === expected) continue;
+    const elementId = readAttr(tag.raw, "id") || undefined;
+    findings.push({
+      code: "media_src_kind_mismatch",
+      severity: "error",
+      message: `<${tag.name}${elementId ? ` id="${elementId}"` : ""}> src is ${SRC_KIND_NOUN[kind]}, not ${SRC_KIND_NOUN[expected]}. The producer fail-closes when the tag and file kind disagree.`,
+      elementId,
+      fixHint:
+        tag.name === "video"
+          ? "Use <img> for a still, <audio> for sound, or point <video> at a video URL (mp4/webm/mov/…)."
+          : "Use <video> for a video URL, <audio> for sound, or point <img> at a still (png/jpg/webp/…).",
+      snippet: truncateSnippet(tag.raw),
+    });
+  }
+  return findings;
+}
+
+function findNestedMediaStartBasisFindings(ctx: LintContext): HyperframeLintFinding[] {
+  if (!ctx.options.isSubComposition) return [];
+  const findings: HyperframeLintFinding[] = [];
+  for (const tag of ctx.tags) {
+    if (tag.name !== "video" && tag.name !== "audio") continue;
+    const rawStart = readAttr(tag.raw, "data-start");
+    const start = rawStart == null || rawStart.trim() === "" ? NaN : Number(rawStart);
+    if (!Number.isFinite(start) || start <= 0) continue;
+    const basis = readAttr(tag.raw, "data-hf-media-start-basis");
+    if (basis === "local" || basis === "global") continue;
+    const elementId = readAttr(tag.raw, "id") || undefined;
+    findings.push({
+      code: "nested_media_start_basis_ambiguous",
+      severity: "warning",
+      message: `<${tag.name}${elementId ? ` id="${elementId}"` : ""}> has data-start="${rawStart}" inside a sub-composition. Nested media timing is local to its composition by default; a nonzero value can be confused with a legacy root-global timestamp.`,
+      elementId,
+      fixHint: `Keep data-start="${rawStart}" if it is composition-local. If this is a legacy root-global timestamp, add data-hf-media-start-basis="global"; otherwise convert it to local time by subtracting the host start.`,
+      snippet: truncateSnippet(tag.raw),
+    });
+  }
+  return findings;
 }
 
 /** Parent `src`, else a descendant `<source src>` (matches engine resolveMediaElementSrc). */
@@ -238,7 +363,49 @@ function findImperativeMediaControlFindings(ctx: LintContext): HyperframeLintFin
   return findings;
 }
 
+function findRuntimeMediaSrcMutationFindings(ctx: LintContext): HyperframeLintFinding[] {
+  const { document } = parseHTML(ctx.source);
+  const findings: HyperframeLintFinding[] = [];
+  for (const script of ctx.scripts) {
+    for (const mutation of extractMediaSrcMutations(script.content)) {
+      let targets: Element[];
+      try {
+        const id = /^#[A-Za-z_][\w-]*$/.test(mutation.selector) ? mutation.selector.slice(1) : null;
+        const idTarget = id ? document.getElementById(id) : null;
+        targets = id
+          ? idTarget
+            ? [idTarget]
+            : []
+          : [...document.querySelectorAll(mutation.selector)];
+      } catch {
+        continue;
+      }
+      const mediaTargets = targets
+        .map((element) => {
+          const name = element.tagName.toLowerCase();
+          if (name === "video" || name === "audio") return element;
+          return name === "source" ? element.closest("video, audio") : null;
+        })
+        .filter((element): element is Element => element !== null);
+      if (mediaTargets.length === 0) continue;
+      findings.push({
+        code: "media_runtime_src_mutation",
+        severity: "warning",
+        message: `Inline script mutates the source of existing managed media via ${mutation.operation === "src_assignment" ? ".src assignment" : "setAttribute('src', ...)"}. Browser probing can reconcile synchronous writes, but external or delayed writes can still diverge between preview and extraction.`,
+        elementId: mediaTargets[0]?.getAttribute("id") || undefined,
+        selector: mutation.selector,
+        fixHint:
+          "Author the final static src, or bind data-var-src to a declared image/string variable so the selected source is applied before media discovery and extraction.",
+        snippet: truncateSnippet(mutation.raw),
+      });
+    }
+  }
+  return findings;
+}
+
 export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = [
+  findNestedMediaStartBasisFindings,
+  findSpeedRampOnNonMediaFindings,
   // duplicate_media_id + duplicate_media_discovery_risk
   ({ tags }) => {
     const findings: HyperframeLintFinding[] = [];
@@ -351,15 +518,16 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
       if (tag.name !== "video") continue;
       const hasMuted = hasAttrName(tag.raw, "muted");
       const hasDeclaredAudio = readAttr(tag.raw, "data-has-audio") === "true";
-      if (!hasMuted && !hasDeclaredAudio && readAttr(tag.raw, "data-start")) {
+      const declaresAudioState = hasAttrName(tag.raw, "data-has-audio");
+      if (!hasMuted && !declaresAudioState && readAttr(tag.raw, "data-start")) {
         const elementId = readAttr(tag.raw, "id") || undefined;
         findings.push({
           code: "video_missing_muted",
           severity: "error",
-          message: `<video${elementId ? ` id="${elementId}"` : ""}> has data-start but is not muted. Mark audible videos with data-has-audio="true"; otherwise keep video muted and use a separate <audio> element for sound.`,
+          message: `<video${elementId ? ` id="${elementId}"` : ""}> has data-start but declares neither muted nor data-has-audio. If the file has sound, add data-has-audio="true" (the sound stays on this clip). If it is silent, add muted.`,
           elementId,
           fixHint:
-            'Add the `muted` attribute for silent video, or add data-has-audio="true" when the video track should contribute audio.',
+            'Add data-has-audio="true" when the file has sound (recommended — keeps picture and sound on one clip), or add `muted` for silent footage.',
           snippet: truncateSnippet(tag.raw),
         });
       }
@@ -458,6 +626,9 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
     }
     return findings;
   },
+
+  // media_src_kind_mismatch
+  findMediaSrcKindMismatchFindings,
 
   // placeholder_media_url
   ({ tags }) => {
@@ -604,34 +775,37 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
   // <audio> pointing to the same file, which causes double playback at runtime
   ({ tags }) => {
     const findings: HyperframeLintFinding[] = [];
-    const videoSources = new Map<string, { id?: string; raw: string }>();
-    const audioSources = new Map<string, { id?: string; raw: string }>();
+    type Source = { id?: string; raw: string };
+    const videos: Array<[string, Source]> = [];
+    const audios: Array<[string, Source]> = [];
 
     for (const tag of tags) {
       if (!readAttr(tag.raw, "data-start")) continue;
       const src = readAttr(tag.raw, "src");
       if (!src) continue;
-      const elementId = readAttr(tag.raw, "id") || undefined;
+      const source = { id: readAttr(tag.raw, "id") || undefined, raw: tag.raw };
       if (tag.name === "video") {
-        const isMuted = hasAttrName(tag.raw, "muted");
-        if (!isMuted) {
-          videoSources.set(src, { id: elementId, raw: tag.raw });
-        }
+        if (isAudibleVideoTag(tag.raw)) videos.push([src, source]);
       } else if (tag.name === "audio") {
-        audioSources.set(src, { id: elementId, raw: tag.raw });
+        audios.push([src, source]);
       }
     }
 
-    for (const [src, audioInfo] of audioSources) {
-      const videoInfo = videoSources.get(src);
-      if (!videoInfo) continue;
+    for (const [src, audioInfo] of audios) {
+      const match = videos.find(
+        ([videoSrc, video]) =>
+          videoSrc === src &&
+          mediaWindowsOverlap(mediaTimeWindow(video.raw), mediaTimeWindow(audioInfo.raw)),
+      );
+      if (!match) continue;
+      const videoInfo = match[1];
       findings.push({
         code: "video_audio_double_source",
         severity: "error",
-        message: `<audio${audioInfo.id ? ` id="${audioInfo.id}"` : ""}> and <video${videoInfo.id ? ` id="${videoInfo.id}"` : ""}> both point to the same source. The unmuted video already provides audio — the duplicate <audio> will cause double playback and echo.`,
+        message: `<audio${audioInfo.id ? ` id="${audioInfo.id}"` : ""}> and <video${videoInfo.id ? ` id="${videoInfo.id}"` : ""}> both point to the same source at the same time. The unmuted video already provides audio — the duplicate <audio> will cause double playback and echo.`,
         elementId: audioInfo.id,
         fixHint:
-          "Either mute the video (add `muted` attribute) and keep the separate <audio>, or remove the <audio> element and let the video provide its own audio track.",
+          "Remove the <audio> element and let the video carry its own sound (recommended), or mute the video (add `muted`) and keep the separate <audio> when picture and sound must be cut independently.",
         snippet: truncateSnippet(audioInfo.raw),
       });
     }
@@ -640,6 +814,7 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
 
   // imperative_media_control
   findImperativeMediaControlFindings,
+  findRuntimeMediaSrcMutationFindings,
 
   // audio_volume_double_automation
   findVolumeDoubleAutomationFindings,
@@ -657,6 +832,7 @@ export const mediaRules: Array<(ctx: LintContext) => HyperframeLintFinding[]> = 
 
   // audio_group_carve_attr
   findAudioGroupCarveAttrFindings,
+  findLinkedClipFindings,
 ];
 
 /**
@@ -748,6 +924,24 @@ function findVolumeDoubleAutomationFindings(ctx: LintContext): HyperframeLintFin
   return findings;
 }
 
+/** A `rate` lane only retimes video and audio; anywhere else it is silently inert. */
+function findSpeedRampOnNonMediaFindings(ctx: LintContext): HyperframeLintFinding[] {
+  return ctx.tags
+    .filter((tag) => tag.name !== "video" && tag.name !== "audio")
+    .filter((tag) =>
+      /"target"\s*:\s*"rate"/.test(readDecodedAttr(tag.raw, "data-automation") ?? ""),
+    )
+    .map((tag) => ({
+      code: "speed_ramp_on_non_media",
+      severity: "warning",
+      message: `<${tag.name}> has a speed-ramp lane, but only <video> and <audio> clips can be retimed. The lane does nothing here.`,
+      elementId: readAttr(tag.raw, "id") || undefined,
+      fixHint:
+        "Move the rate lane onto the <video> or <audio> clip, or retime an animation with a GSAP timeline instead.",
+      snippet: truncateSnippet(tag.raw),
+    }));
+}
+
 /**
  * A carve's `sources` naming two or more plain clip ids is the normative
  * mistake groups exist to prevent (groups doc §1.6): the list silently rots
@@ -801,7 +995,7 @@ const AUDIO_GROUP_TIMING_ATTRS = ["data-start", "data-duration", "data-track-ind
 /**
  * A bus nobody joined does nothing, silently.
  *
- * `resolveAudioGroups` builds groups from the MEMBERS (`audio[data-audio-group]`)
+ * `resolveAudioGroups` builds groups from the MEMBERS (audio or audible video)
  * and only then looks for a matching `<hf-audio-group>` element, so a bus whose
  * id no clip names is dropped entirely — its fader, FX chain and automation
  * never reach preview or render, and nothing says so. One typo is enough:
@@ -812,7 +1006,7 @@ const AUDIO_GROUP_TIMING_ATTRS = ["data-start", "data-duration", "data-track-ind
 function findAudioGroupNoMembersFindings(ctx: LintContext): HyperframeLintFinding[] {
   const memberGroupIds = new Set(
     ctx.tags
-      .filter((tag) => tag.name === "audio")
+      .filter((tag) => tag.name === "audio" || (tag.name === "video" && isAudibleVideoTag(tag.raw)))
       .map((tag) => readAttr(tag.raw, "data-audio-group"))
       .filter((id): id is string => Boolean(id)),
   );

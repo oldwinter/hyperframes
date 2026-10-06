@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/sdk",
-  "version": "0.8.20",
+  "version": "0.8.135",
   "description": "Headless, framework-neutral HyperFrames composition editing engine",
   "repository": {
     "type": "git",
@@ -46,8 +46,7 @@
     }
   },
   "publishConfig": {
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts",
+    "access": "public",
     "exports": {
       ".": {
         "import": "./dist/index.js",
@@ -74,7 +73,8 @@
         "types": "./dist/editing/affordances.d.ts"
       }
     },
-    "access": "public"
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts"
   },
   "scripts": {
     "build": "tsc",
@@ -86,12 +86,12 @@
   "dependencies": {
     "@hyperframes/core": "workspace:*",
     "@hyperframes/parsers": "workspace:*",
-    "linkedom": "^0.18.13"
+    "linkedom": "^0.18.12"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
-    "happy-dom": "^20.12.0",
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "happy-dom": "^20.9.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.11"
   }
 }

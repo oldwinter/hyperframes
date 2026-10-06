@@ -13,7 +13,11 @@ import {
   seekCompositionTimeline,
   waitForPreferredSeekTarget,
 } from "../capture/captureCompositionFrame.js";
-import { auditClipDurations, shouldIgnoreRequestFailure } from "../commands/validate.js";
+import {
+  auditClipDurations,
+  shouldIgnoreHttpError,
+  shouldIgnoreRequestFailure,
+} from "../commands/validate.js";
 import { loadBrowserScript } from "../commands/layout.js";
 import { normalizeErrorMessage } from "./errorMessage.js";
 import { ambiguousIssue, type MotionFrame } from "./motionAudit.js";
@@ -117,7 +121,7 @@ export async function preResolveHostileMediaProxies(
   try {
     codecMap = await scanProjectMediaCodecMap(projectDir, [{ html }]);
   } catch (err) {
-    console.info(
+    console.error(
       `[hyperframes] media proxy pre-resolve: scan failed (${normalizeErrorMessage(err)})`,
     );
     return;
@@ -138,7 +142,7 @@ export async function preResolveHostileMediaProxies(
     ),
   );
   const failed = results.filter((result) => result.status === "rejected").length;
-  console.info(
+  console.error(
     `[hyperframes] media proxy pre-resolve: ${results.length - failed}/${results.length} ready, ${failed} failed (${Date.now() - startedAt}ms)`,
   );
 }
@@ -381,6 +385,7 @@ function wireNetworkListeners(page: Page, drafts: RuntimeDraft[], currentTime: (
     if (response.status() < 400) return;
     const url = response.url();
     if (url.includes("favicon")) return;
+    if (shouldIgnoreHttpError(url, response.status())) return;
     drafts.push({
       code: "http_error",
       severity: "error",
@@ -429,6 +434,7 @@ async function hasNoTimelineDeclaration(page: Page): Promise<boolean> {
 }
 
 async function injectAuditScripts(page: Page, contrast: boolean): Promise<void> {
+  await page.addScriptTag({ content: loadBrowserScript("motion-signature.browser.js") });
   await page.addScriptTag({ content: loadBrowserScript("layout-audit.browser.js") });
   await page.addScriptTag({ content: loadBrowserScript("motion-sample.browser.js") });
   if (contrast) {
@@ -1220,7 +1226,9 @@ const LAYOUT_ISSUE_CODES: readonly LayoutIssueCode[] = [
   "frame_out_of_frame",
   "escaped_container",
   "panel_out_of_canvas",
+  "canvas_content_at_edge",
   "connector_detached",
+  "connector_orphan",
   "rotation_pivot_drift",
   "off_pivot_rotation",
   "motion_appears_late",

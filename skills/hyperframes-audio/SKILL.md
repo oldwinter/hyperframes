@@ -13,15 +13,15 @@ description: >
   `/hyperframes-core`.
 ---
 
+**Plugin installs:** Before setup or freshness commands, follow [plugin execution rules](../hyperframes/references/plugin-installation.md) when this skill is inside a HyperFrames plugin. Standalone installs keep the update instructions below.
+
 ## 中文执行导读
 
 当已有音频需要在 HyperFrames composition 中做混音时使用：例如给 voiceover 让出频段、为轨道添加 EQ / compressor / limiter / gate / saturation / delay / reverb / chorus / phaser / bitcrush，绘制音量与效果参数的 automation，或让多个轨道共享一个 submix bus。不要用它寻找或生成音频，也不要用它处理 clip timing 或 track layout；分别路由到 `/media-use` 和 `/hyperframes-core`。
 
-执行前先读取 `references/attributes.md`、`references/fx-registry.md`、`references/diagnosis.md`；准备手写 chain 前先查 `references/presets.md`。保持 `data-fx-chain`、`data-automation`、`data-fx-carve` 的 JSON 结构、参数范围、单位和 preview/render parity 不变。先确认两个 authoring surface 写入相同属性，再用 preview 验证，最后执行 render；不要为 preview 和 render 各调一套效果。
+执行前先读取 `references/attributes.md`、`references/fx-registry.md`、`references/diagnosis.md`；准备手写 chain 前先查 `references/presets.md`。保持 `data-fx-chain`、`data-automation`、`data-fx-carve` 的 JSON 结构、参数范围、单位和 preview/render parity 不变。多个 voice clip 必须先归入纯 voiceover group，再让 carve 引用 group id；该分组不得包含 bed、SFX、music 或被 carve 的 bed 本身。
 
-为多个 voice clip 做 carve 时，必须先用同一个 `data-audio-group` 把它们归入纯 voiceover 分组，再让 `data-fx-carve.sources` 引用 group id；不要逐个列出多个 clip id。该分组不能混入 bed、SFX 或 music，也不能包含被 carve 的 bed 本身，否则后续重新分析会把错误成员纳入 sidechain。`audio_carve_ungrouped_sources` lint 会标出仍在逐个引用多个 clip 的写法。
-
-当多个轨道需要同一套处理时，使用 `<hf-audio-group>` submix bus，把 `data-fx-chain`、`data-automation` 和 `data-volume` 放在 bus 上；bus 的 automation 使用 composition time，且不带 `data-start`。`data-fx-carve` 仍必须写在被 carve 的 bed clip 上，并通过 `sources` 指向纯 voiceover group；不要把 carve 写到 bus 上。单成员 bus 只在确实需要 composition-time automation 时使用。
+多个轨道需要同一套处理时使用 `<hf-audio-group>` submix bus，把 `data-fx-chain`、`data-automation` 和 `data-volume` 放在 bus 上；bus automation 使用 composition time 且不带 `data-start`。`data-fx-carve` 仍写在被 carve 的 bed clip 上，不写到 bus 上。
 
 # HyperFrames Audio
 
@@ -42,10 +42,11 @@ crossfade envelopes, track gain/track volume, volume and effect automation,
 ducking/voiceover carve, and the effect chain. `/media-use` owns sourcing,
 generation, and preprocessing.
 
-Constant `data-playback-rate` (`0.1..5`) is render-safe for picture and
+Constant `data-playback-rate` (`0.1..10`) is render-safe for picture and
 pitch-preserved sound when matching audio/video elements use the same timing,
-source offset, and rate. Source speed ramps are not supported because there is
-no rate envelope; preprocess a derived synchronized asset. HyperFrames does not
+source offset, and rate. A speed ramp is a `rate` lane in `data-automation`
+(see `docs/reference/speed-ramps`); it wins over the constant and keeps pitch
+in preview and render. HyperFrames does not
 provide automatic waveform sync or drift correction.
 For copyable cut/crossfade/retime recipes, use `/hyperframes-core` → `references/creator-editing-recipes.md`.
 
@@ -81,7 +82,7 @@ flowchart TB
 
   subgraph AUTHOR["Authoring — the only things that write attributes"]
     panel["Studio<br/>Voiceover carve control"]
-    script["scripts/carve.mjs<br/>detects the pair, dynamic by default"]
+    script["scripts/carve.mjs<br/>detects the pair"]
     analysis["core/audioCarve.ts<br/>carveProfile · analyseCarveBands<br/>analyseCarveDuck · analyseCarveDynamics"]
     panel --> analysis
     script --> analysis
@@ -91,7 +92,7 @@ flowchart TB
   bed --> analysis
 
   subgraph ATTRS["Written onto the bed element"]
-    carveAttr["data-fx-carve<br/>source · strength · dynamic"]
+    carveAttr["data-fx-carve<br/>sources · strength"]
     chainAttr["data-fx-chain<br/>peaking xN + gain, tagged fromCarve"]
     autoAttr["data-automation<br/>a lane per carved parameter"]
   end
@@ -141,8 +142,6 @@ flowchart LR
   l1["lane fx.n1.gain"] -.->|"envelope of the voice's<br/>level in that band"| p1
   l4["lane fx.n4.gain"] -.->|"how far the bed<br/>ducks overall"| g
 ```
-
-A static carve is the same graph with fixed values and no lanes at all.
 
 ## First, work out what is wrong
 
@@ -262,11 +261,7 @@ analysis time, so a clip added to the group later is covered without touching
 <audio id="vo-middle" data-audio-group="voiceover" …></audio>
 <audio id="vo-outro" data-audio-group="voiceover" …></audio>
 
-<audio
-  id="music"
-  data-fx-carve='{"enabled":true,"sources":["voiceover"],"strength":0.25}'
-  …
-></audio>
+<audio id="music" data-fx-carve='{"enabled":true,"sources":["voiceover"],"strength":0.8}' …></audio>
 ```
 
 A `sources` list naming two or more plain clip ids instead of a group is caught
@@ -365,17 +360,26 @@ many bands, how wide, how far to favour intelligibility over raw voice energy,
 how far the level may drop, how far under the voice to aim. Those six move
 together in any real mix — a gentle carve is a shallow cut in few bands with
 little ducking, a hard one is deeper in more bands with more — so they are one
-relationship written once, in `carveProfile`. Default is `0.25` — a 6 dB dip in
-three bands with 6 dB of level room, audible without sounding like a hole. At
-`0.5` the dip reaches 10 dB, which is where a carve starts being heard as an
-effect rather than as room for the voice; above that is deliberate territory for
-a loud bed under a quiet voice. `0` is spectral only — one band, no level match
-at all.
+relationship written once, in `carveProfile`. `carve.mjs` defaults to `0.8` —
+six bands from 250 Hz to 2.5 kHz cut about 7 dB each and 15 dB at 1.6 kHz, with
+19 dB of level room — because a bed under narration has to get out of the way
+first and be music second; `0.25` (a 6 dB dip in three bands, 6 dB of room) kept
+the bed present but still let it fight the voice, and was judged too weak in
+practice. At `0.5` the dip reaches 10 dB, which is where a carve starts being
+heard as an effect rather than as room for the voice. Drop the strength when the
+bed is the point and the voice is sparse. `0` is spectral only — one band, no
+level match at all.
 
-**Carve by default.** A bed playing under narration wants a carve; it is not a
-polish step to get to if there is time. Place both tracks, run the command below,
-listen. Skip it only when there is no narration for the music to sit under — a
-music video, a title card, a montage cut to the track.
+**Carve by default — required whenever music plays under a voice.** A bed
+under any voice track (narration, avatar speech, interview, voiceover) gets a
+carve as part of finishing the mix, not as a polish step to get to if there is
+time. Place both tracks, run the command below (default strength `0.8`; add
+`--bed` / `--voice` when detection picks wrong), confirm the written
+`data-fx-carve`, `data-fx-chain` and `data-automation` with `npx hyperframes check`,
+and only then render. A volume duck on its own is not a finished mix: it leaves
+the voice and the bed fighting in the 1–3 kHz band and costs the bed all of its
+presence for the whole voiceover. Skip the carve only when there is no voice for
+the music to sit under — a music video, a title card, a montage cut to the track.
 
 **It always follows the voice.** There is no static mode: a fixed depth thins the
 bed through every pause, and once you have heard both there is no reason to want it.
@@ -385,15 +389,14 @@ which is why the lanes show up in the timeline and can be edited afterwards.
 
 **Level matching is part of it.** Spectral carving cannot fix a bed that is
 simply louder than the voice. So the carve also measures how far over the voice
-the bed sits and writes a `gain` stage: held at one value for a static carve,
-driven by an envelope for a dynamic one. That envelope releases slowly on
+the bed sits and writes a `gain` stage driven by an envelope. That envelope releases slowly on
 purpose — music that snaps back to full the instant a word ends sounds like a
 machine doing it.
 
 **Running it.** In Studio the carve is one module at the top of a track's effect
-rack — voice, strength, dynamic, and the analysis it produced, in one card. It is
+rack — voice, strength, and the analysis it produced, in one card. It is
 there whenever another track could be the voice, and a bed with exactly **one**
-candidate above it is carved by default, dynamically, at the default strength:
+candidate above it is carved by default, at the default strength:
 that is what a bed under narration wants, and the module is where you change or
 switch it off. Several candidates leaves the picker waiting rather than guessing.
 Headless —
@@ -404,14 +407,14 @@ node <SKILL_DIR>/scripts/carve.mjs --comp index.html
 ```
 
 That is the whole command. It finds the voice and the bed itself, carves
-dynamically at the default strength, and prints what it decided:
+at the default strength, and prints what it decided:
 
 ```
 bed    music-bed (name looks like music)
 voice  narration (only track left)
-carve  strength 0.25 dynamic
-bands  400Hz -6dB q1.4, 1000Hz -3dB q1.4, 1600Hz -3.17dB q1.4
-level  216-point envelope, floor -6 dB
+carve  strength 0.8, 1 voice
+bands  250Hz -7.4dB q2.06, 400Hz -7.4dB q2.06, 630Hz -7.4dB q2.06, 1000Hz -7.4dB q2.06, 1600Hz -14.8dB q2.06, 2500Hz -7.4dB q2.06
+level  273-point envelope, floor -19.2 dB
 ```
 
 Name the tracks with `--bed` / `--voice` (repeatable) when the automatic choice is
@@ -474,7 +477,7 @@ its source, and the mix is told how much by the chain. So a bed with reverb no
 longer ends exactly at its `data-duration`; that is expected, not a bug.
 
 Beyond that, a mix is verified by rendering and listening. For a carve: the voice
-should be legible without the bed sounding hollowed, and with `dynamic` the bed
+should be legible without the bed sounding hollowed, and the bed
 should come back up between phrases rather than staying flat. If the bed sounds
 notched rather than simply quieter under the voice, the strength is too high —
 that is the one failure mode with an obvious sound.

@@ -13,24 +13,24 @@ function skillsAddCommands(source) {
   return source.match(SKILLS_ADD) ?? [];
 }
 
-test("README skills add commands include --full-depth", () => {
+test("README skills add commands use the current root skill discovery", () => {
   const readme = readFileSync(join(root, "README.md"), "utf8");
   const commands = skillsAddCommands(readme);
   assert.ok(commands.length > 0, "README should document npx skills add …/hyperframes");
-  assert.match(readme, /npx skills add oldwinter\/hyperframes --full-depth/);
-  assert.match(readme, /npx skills add heygen-com\/hyperframes --full-depth/);
+  assert.match(readme, /npx skills add oldwinter\/hyperframes/);
+  assert.match(readme, /npx skills add heygen-com\/hyperframes/);
   for (const command of commands) {
-    assert.match(
+    assert.doesNotMatch(
       command,
       /--full-depth/,
-      `nested skills/ install needs --full-depth: ${command}`,
+      `root skill discovery no longer needs --full-depth: ${command}`,
     );
   }
 });
 
-test("Chinese install profile uses --full-depth", () => {
+test("Chinese install profile points at the localized fork", () => {
   const profile = readFileSync(join(root, "docs/translation-profile.zh-CN.md"), "utf8");
   const commands = skillsAddCommands(profile);
   assert.equal(commands.length, 1);
-  assert.equal(commands[0], "npx skills add oldwinter/hyperframes --full-depth");
+  assert.equal(commands[0], "npx skills add oldwinter/hyperframes");
 });

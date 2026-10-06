@@ -1,3 +1,4 @@
+import { launchManagedBrowser, resolveManagedGpuMode } from "../browser/launch.js";
 // The media-metadata wait exists twice on purpose: once Node-side and once
 // inside a page.evaluate() body, which is serialized into the browser and
 // cannot import the Node helper. Line-level markers don't survive the clone
@@ -19,6 +20,7 @@ import {
   installPageFunctionGuard,
   resolveCliChromeGpuMode,
   seekCompositionTimeline,
+  waitForRuntimeReady,
 } from "../capture/captureCompositionFrame.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -79,10 +81,23 @@ export function shouldIgnoreRequestFailure(
   errorText: string | undefined,
   resourceType?: string,
 ): boolean {
+  if (errorText === "net::ERR_ABORTED" && isOptionalCaptionOverridesRequest(url)) return true;
   if (errorText !== "net::ERR_ABORTED") return false;
   if (resourceType === "media") return true;
   try {
     return MEDIA_EXTENSIONS.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function shouldIgnoreHttpError(url: string, status: number): boolean {
+  return status === 404 && isOptionalCaptionOverridesRequest(url);
+}
+
+function isOptionalCaptionOverridesRequest(url: string): boolean {
+  try {
+    return new URL(url).pathname === "/caption-overrides.json";
   } catch {
     return false;
   }
@@ -419,18 +434,15 @@ async function validateInBrowser(
     const puppeteer = await import("puppeteer-core");
     const { buildChromeArgs, analyzeClipMediaFit } = await import("@hyperframes/engine");
     const requestedGpuMode = resolveCliChromeGpuMode();
-    const { assertWebGpuRequirement, resolveCaptureBrowserGpuMode } =
+    const { assertWebGpuAdapterAvailable, compositionRequiresWebGpu } =
       await import("../browser/gpuPolicy.js");
-    const resolvedGpuMode = await resolveCaptureBrowserGpuMode(
-      requestedGpuMode,
-      browser.executablePath,
-    );
-    assertWebGpuRequirement(html, requestedGpuMode, resolvedGpuMode);
-    const chromeBrowser = await puppeteer.default.launch({
+    const resolvedGpuMode = await resolveManagedGpuMode(requestedGpuMode, browser.executablePath);
+    const requiresWebGpu = compositionRequiresWebGpu(html);
+    const chromeBrowser = await launchManagedBrowser(puppeteer.default, {
       headless: true,
       executablePath: browser.executablePath,
       args: buildChromeArgs(
-        { ...viewport, captureMode: "screenshot" },
+        { ...viewport, captureMode: "screenshot", requiresWebGpu },
         { browserGpuMode: resolvedGpuMode },
       ),
     });
@@ -477,6 +489,7 @@ async function validateInBrowser(
       if (res.status() >= 400) {
         const url = res.url();
         if (url.includes("favicon")) return;
+        if (shouldIgnoreHttpError(url, res.status())) return;
         const path = decodeURIComponent(new URL(url).pathname).replace(/^\//, "");
         errors.push({ level: "error", text: `${res.status()} loading ${path}`, url });
       }
@@ -490,6 +503,8 @@ async function validateInBrowser(
       if (hinted) throw hinted;
       throw err;
     }
+    await assertWebGpuAdapterAvailable(page, requiresWebGpu);
+    await waitForRuntimeReady(page, opts.timeout ?? 3000);
     await new Promise((r) => setTimeout(r, opts.timeout ?? 3000));
 
     for (const w of await auditClipDurations(page, analyzeClipMediaFit, opts.timeout ?? 3000)) {

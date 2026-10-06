@@ -1,8 +1,10 @@
 import { setCommandExitCode } from "../../utils/commandResult.js";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { createWriteStream, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { resolve, join, basename } from "node:path";
 import { c } from "../../ui/colors.js";
 import { safeFetch } from "../../capture/assetDownloader.js";
+import { ensureCaptureDirSync } from "../../capture/captureFile.js";
+import { CAPTURE_USER_AGENT } from "../../capture/userAgent.js";
 
 const MAX_VIDEO_BYTES = 250 * 1024 * 1024;
 const VIDEO_CONTENT_TYPE_RE = /^(video\/|application\/(mp4|octet-stream|x-mpegurl))/i;
@@ -12,7 +14,7 @@ async function streamToFile(url: string, destPath: string): Promise<number> {
   // safeFetch re-validates redirect hops; bare redirect:"follow" leaks to private hosts.
   const r = await safeFetch(url, {
     signal: AbortSignal.timeout(120_000),
-    headers: { "User-Agent": "HyperFrames/1.0" },
+    headers: { "User-Agent": CAPTURE_USER_AGENT },
   });
   if (!r) {
     throw new Error(
@@ -253,7 +255,13 @@ export async function runVideoMode(args: VideoModeArgs): Promise<void> {
   const outDir = isW2hLayout
     ? join(projectDir, "capture", "assets", "videos")
     : join(projectDir, "assets", "videos");
-  mkdirSync(outDir, { recursive: true });
+  try {
+    ensureCaptureDirSync(projectDir, outDir);
+  } catch (e) {
+    console.error(`${c.error("✗")} ${(e as Error).message}`);
+    setCommandExitCode(1);
+    return;
+  }
   const fname = safeFilename(entry.filename || basename(entry.url));
   const outPath = join(outDir, fname);
   const relPath = isW2hLayout ? `capture/assets/videos/${fname}` : `assets/videos/${fname}`;

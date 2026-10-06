@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/parsers",
-  "version": "0.8.20",
+  "version": "0.8.135",
   "repository": {
     "type": "git",
     "url": "https://github.com/heygen-com/hyperframes",
@@ -88,6 +88,24 @@
       "import": "./src/compositionContract.ts",
       "types": "./src/compositionContract.ts"
     },
+    "./media-duration": {
+      "bun": "./src/mediaDuration.ts",
+      "node": "./dist/mediaDuration.js",
+      "import": "./src/mediaDuration.ts",
+      "types": "./src/mediaDuration.ts"
+    },
+    "./media-duration-fixtures": {
+      "bun": "./src/mediaDurationFixtures.ts",
+      "node": "./dist/mediaDurationFixtures.js",
+      "import": "./src/mediaDurationFixtures.ts",
+      "types": "./src/mediaDurationFixtures.ts"
+    },
+    "./top-level-elements": {
+      "bun": "./src/topLevelElements.ts",
+      "node": "./dist/topLevelElements.js",
+      "import": "./src/topLevelElements.ts",
+      "types": "./src/topLevelElements.ts"
+    },
     "./color-grading-contract": {
       "bun": "./src/colorGradingContract.ts",
       "node": "./dist/colorGradingContract.js",
@@ -111,11 +129,16 @@
       "node": "./dist/assetResolution.js",
       "import": "./src/assetResolution.ts",
       "types": "./src/assetResolution.ts"
+    },
+    "./composition-duration": {
+      "bun": "./src/compositionDuration.ts",
+      "node": "./dist/compositionDuration.js",
+      "import": "./src/compositionDuration.ts",
+      "types": "./src/compositionDuration.ts"
     }
   },
   "publishConfig": {
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts",
+    "access": "public",
     "exports": {
       ".": {
         "import": "./dist/index.js",
@@ -166,6 +189,18 @@
         "import": "./dist/compositionContract.js",
         "types": "./dist/compositionContract.d.ts"
       },
+      "./media-duration": {
+        "import": "./dist/mediaDuration.js",
+        "types": "./dist/mediaDuration.d.ts"
+      },
+      "./media-duration-fixtures": {
+        "import": "./dist/mediaDurationFixtures.js",
+        "types": "./dist/mediaDurationFixtures.d.ts"
+      },
+      "./top-level-elements": {
+        "import": "./dist/topLevelElements.js",
+        "types": "./dist/topLevelElements.d.ts"
+      },
       "./color-grading-contract": {
         "import": "./dist/colorGradingContract.js",
         "types": "./dist/colorGradingContract.d.ts"
@@ -181,9 +216,14 @@
       "./asset-resolution": {
         "import": "./dist/assetResolution.js",
         "types": "./dist/assetResolution.d.ts"
+      },
+      "./composition-duration": {
+        "import": "./dist/compositionDuration.js",
+        "types": "./dist/compositionDuration.d.ts"
       }
     },
-    "access": "public"
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts"
   },
   "scripts": {
     "build": "tsup",
@@ -193,19 +233,19 @@
     "prepublishOnly": "echo skip"
   },
   "dependencies": {
-    "@babel/parser": "^8.0.4",
-    "acorn": "^8.18.0",
+    "@babel/parser": "^7.27.0",
+    "acorn": "^8.17.0",
     "acorn-walk": "^8.3.5",
-    "linkedom": "^0.18.13",
-    "magic-string": "^1.2.3",
-    "recast": "^0.24.0"
+    "linkedom": "^0.18.12",
+    "magic-string": "^0.30.21",
+    "recast": "^0.23.11"
   },
   "devDependencies": {
     "@hyperframes/core": "workspace:*",
     "@types/node": "^25.0.10",
-    "tsup": "^8.5.1",
-    "tsx": "^4.23.13",
-    "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "tsup": "^8.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.11"
   }
 }
